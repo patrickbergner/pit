@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # gh release create
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve version
+        id: version
+        run: |
+          version="$(tr -d '[:space:]' <VERSION)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){0,3}$'; then
+            echo "error: VERSION holds '$version', expected 1-4 dot-separated numbers" >&2
+            exit 1
+          fi
+          # build.sh stamps VERSION into the binary with -X main.version, and
+          # `pit version` prints it, so a tag that disagreed would publish a
+          # binary contradicting the release it is published under. Fail before
+          # anything is built.
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/}" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "error: tag $GITHUB_REF_NAME does not match VERSION (expected v$version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "Version: $version"
+
+      # See ci.yml for why this is its own step.
+      - name: Require git-lfs
+        run: git lfs version
+
+      # The release re-proves everything rather than trusting that CI passed on
+      # the same commit.
+      - name: Test
+        run: ./run-tests.sh
+
+      - name: Build
+        run: ./build.sh
+
+      # The ldflags stamp is the one thing no test covers. Only the linux/amd64
+      # binary can be run here.
+      - name: Verify the stamp
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          reported="$(./pit-linux-amd64 version)"
+          if [ "$reported" != "pit $VERSION" ]; then
+            echo "error: the binary reports '$reported', expected 'pit $VERSION'" >&2
+            exit 1
+          fi
+
+      # One zip per platform holding pit-<version>/ with the binary under its
+      # plain name (pit or pit.exe) and the short readme. zip keeps the Unix
+      # executable bit.
+      - name: Package platform archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          for binary in pit-*; do
+            platform="${binary#pit-}"
+            platform="${platform%.exe}"
+
+            payload="pit-${VERSION}"
+            rm -rf "staging/${platform}"
+            mkdir -p "staging/${platform}/${payload}"
+
+            if [[ "$binary" == *.exe ]]; then
+              cp "$binary" "staging/${platform}/${payload}/pit.exe"
+            else
+              cp "$binary" "staging/${platform}/${payload}/pit"
+              chmod +x "staging/${platform}/${payload}/pit"
+            fi
+            cp dist-readme.txt "staging/${platform}/${payload}/readme.txt"
+
+            archive="pit-${VERSION}-${platform}.zip"
+            (cd "staging/${platform}" && zip -r -q "../../artifacts/${archive}" "${payload}")
+            echo "packaged artifacts/${archive}"
+          done
+          ls -l artifacts
+
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum *.zip >SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pit-${{ steps.version.outputs.version }}
+          path: |
+            artifacts/*.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0 # the payload is already-compressed archives
+
+      # Gated on the tag, so a workflow_dispatch run is a full rehearsal –
+      # test, build, artifacts – that publishes nothing.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          archives=(artifacts/pit-"$VERSION"-*.zip)
+          if [ "${#archives[@]}" -ne 5 ]; then
+            echo "error: expected 5 archives, found ${#archives[@]}" >&2
+            printf '  %s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${archives[@]}" artifacts/SHA256SUMS.txt \
+            --title "pit $VERSION" --generate-notes

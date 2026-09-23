@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The LFS tests skip themselves when git-lfs is missing, which would turn
+      # a runner-image change into a quietly smaller suite. Fail loudly instead.
+      - name: Require git-lfs
+        run: git lfs version
+
+      # run-tests.sh gates on gofmt, then runs go vet and go test – the script a
+      # maintainer runs, rather than a copy of it here.
+      - name: Test
+        run: ./run-tests.sh
+
+      # Cross-compiling every platform on every push catches a build-tagged or
+      # platform-specific break before a tag does.
+      - name: Build
+        run: ./build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pit-${{ github.sha }}
+          path: pit-*
+          if-no-files-found: error
+          retention-days: 7
