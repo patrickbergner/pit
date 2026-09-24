@@ -181,6 +181,48 @@ git commit -m "Store libs/mylib files as its .gitattributes say"
 
 `pit pull` and `pit add` fetch the LFS objects of incoming external commits from the external repo before merging.
 
+### Let each external own its LFS rules
+
+The monorepo and its externals will usually track different file types in LFS. Only one direction causes trouble: a pattern tracked by the
+monorepo's root attributes but not by the external's own. The other direction is harmless, since the external's rule lives inside
+`repoPath` and applies on both sides.
+
+To keep the monorepo's rules out of all externals for good, start the `.gitattributes` of every external repo with the opt-out line and
+list its own patterns below it:
+
+```
+* !filter !diff !merge
+*.png filter=lfs diff=lfs merge=lfs -text
+```
+
+The root rules then only apply to the monorepo's own directories. In the external repo itself the line has no effect, since there's
+nothing to inherit.
+
+### Fixing a mismatch before the first import
+
+`pit add` warns about a mismatch right after the import. Fixing it with `git add --renormalize` only applies from that commit on; the
+external's history keeps the files as regular blobs. To move them into LFS retroactively, rewrite the external's history before the
+monorepo depends on it – that is, as long as the import commit hasn't been pushed:
+
+```sh
+# in the monorepo: drop the import (HEAD is pit's subtree merge)
+git reset --hard HEAD^
+
+# in a separate clone of the external repo (check out other branches locally first so --everything covers them)
+git lfs migrate import --include="*.cdr" --everything
+git push --force --all origin
+git push --force --tags origin
+
+# back in the monorepo
+pit add mylib
+```
+
+`git lfs migrate import` also adds the pattern to `.gitattributes` in every rewritten commit, so the imported `repoPath` is self-contained.
+Other clones of the external repo must be re-cloned or hard-reset after the force push.
+
+Once an external has been imported and pushed, don't rewrite its history: the split and rejoin commits (see [How it works](#how-it-works))
+tie the monorepo to the external's commit IDs. From then on, fix mismatches going forward with `git add --renormalize` as shown above.
+
 ## How it works
 
 - **Split.** `git subtree split` turns the history of `repoPath` into a history containing only that directory. It is deterministic: the
