@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,8 +22,8 @@ type Repo struct {
 // Open locates the monorepo around the working directory, loads its config and changes to its top directory (git subtree must run from
 // there).
 func Open() (*Repo, error) {
-	if _, err := exec.LookPath("git"); err != nil {
-		return nil, errors.New("git not found on PATH")
+	if _, err := git.Path(); err != nil {
+		return nil, err
 	}
 	root, err := git.Output("rev-parse", "--show-toplevel")
 	if err != nil || root == "" {

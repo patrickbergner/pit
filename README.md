@@ -17,7 +17,8 @@ The monorepo stays the single source of truth. `pit` is a single native binary w
 ## Requirements
 
 - `git` on `PATH`, including `git subtree` (part of git's contrib scripts; Git for Windows and most Linux distributions and Homebrew
-  ship it).
+  ship it). On Windows, a `git.bat` or `git.cmd` shim on `PATH` is fine: pit runs the `git.exe` from its exec path instead, since cmd.exe
+  would mangle arguments such as `HEAD^{tree}`.
 - `git-lfs`, only if Git LFS is actually used in the monorepo or an external repo. The LFS attribute checks need git ≥ 2.40.
 
 ## Installation

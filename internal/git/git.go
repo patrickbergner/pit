@@ -8,9 +8,35 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// Path returns the git executable pit runs, resolved once.
+var Path = sync.OnceValues(resolve)
+
+// resolve finds git on PATH. On Windows that may be a git.bat or git.cmd shim, which Go runs through cmd.exe, and cmd.exe mangles arguments:
+// '^' is its escape character ("HEAD^{tree}" arrives as "HEAD{tree}") and '&' starts another command. A shim is therefore replaced by the
+// git.exe in its exec path, so pit runs the same git the shim would.
+func resolve() (string, error) {
+	path, err := exec.LookPath("git")
+	if err != nil {
+		return "", errors.New("git not found on PATH")
+	}
+	if ext := strings.ToLower(filepath.Ext(path)); ext != ".bat" && ext != ".cmd" {
+		return path, nil
+	}
+	if out, err := exec.Command(path, "--exec-path").Output(); err == nil {
+		exe := filepath.Join(strings.TrimSpace(string(out)), "git.exe")
+		if _, err := os.Stat(exe); err == nil {
+			return exe, nil
+		}
+	}
+	return "", fmt.Errorf("git on PATH is the batch file %s, which would mangle pit's arguments, and no git.exe was found in its exec path; "+
+		"put a git.exe first on PATH", path)
+}
 
 // Error reports a failed git command together with its stderr.
 type Error struct {
@@ -31,8 +57,12 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // Raw runs git with stdin (may be nil) and returns its stdout.
 func Raw(stdin io.Reader, args ...string) ([]byte, error) {
+	bin, err := Path()
+	if err != nil {
+		return nil, &Error{args, "", err}
+	}
 	var out, errb bytes.Buffer
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &out, &errb
 	if err := cmd.Run(); err != nil {
 		return out.Bytes(), &Error{args, errb.String(), err}
@@ -74,7 +104,11 @@ func Code(args ...string) (int, error) {
 
 // Pass runs git with its output going straight to the user; env is added to ours.
 func Pass(env []string, args ...string) error {
-	cmd := exec.Command("git", args...)
+	bin, err := Path()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
