@@ -21,11 +21,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The LFS tests skip themselves when git-lfs is missing, which would turn
-      # a runner-image change into a quietly smaller suite. Fail loudly instead.
-      - name: Require git-lfs
-        run: git lfs version
-
       # run-tests.sh gates on gofmt, then runs go vet and go test – the script a
       # maintainer runs, rather than a copy of it here.
       - name: Test

@@ -1,49 +1,61 @@
 pit - Polyrepo Integration Tool
 
-pit keeps a monorepo and the external repositories in its subdirectories in
-sync, in both directions, without ever handing a repository history that
-isn't its own. It wraps git subtree: pit push publishes commits touching a
-directory to its external repo as commits containing only that directory,
-pit pull merges contributions made in the external repos back, and a
-pre-push hook blocks every push to an external repo that bypasses pit.
+pit lets you work with a directory tree made of several git repositories
+as if it were one. The repositories listed in pit-externals.json are
+cloned into their subdirectories as plain clones; pit then runs status,
+diff, add, commit, log, pull and push across all of them at once. A pit
+commit commits in every repo with changes, all with the same message.
+
+Each external stays an ordinary clone: cd into it and use git directly
+whenever you like.
 
 Requirements:
-  git on PATH, including git subtree (Git for Windows, most Linux
-  distributions and Homebrew ship it). git-lfs only if Git LFS is used;
-  the LFS checks need git >= 2.40.
+  git on PATH.
 
 Installation:
   Put pit anywhere on your PATH.
 
 Quick start:
-  1. Add externals.json at the root of your monorepo:
+  1. Create pit-externals.json in the directory that should hold the repos:
        {
          "externals": {
-           "mylib": { "url": "https://github.com/you/mylib.git", "repoPath": "libs/mylib" }
+           "mylib": { "url": "https://github.com/you/mylib.git", "path": "libs/mylib" }
          }
        }
-  2. Install the guard hook, once per clone:   pit install-hook
-  3. Either import an existing external repo:  pit add mylib
-     or publish libs/mylib to an empty one:    pit push mylib
-  4. From then on use pit status, pit pull and pit push instead of
-     git pull / git push.
+  2. Clone everything:                 pit sync
+  3. Then, anywhere in the tree:       pit status
+                                       pit add -A
+                                       pit commit -m "message"
+                                       pit push
+
+If the directory holding pit-externals.json is a git repo itself, it is
+included as the repo "." and pit sync keeps the externals out of it via
+its .gitignore.
 
 Commands:
-  list                                  Show the configured externals
-  status [--no-fetch] [ext...]          Commits waiting to be pushed / pulled
-  pull   [ext...]                       Merge the monorepo's upstream, then new
-                                        external commits into each repoPath
-  push   [-n] [-y] [ext...]             Show the full plan, ask once, then push:
-                                        monorepo first, then the external repos
-  add    (ext... | --all)               First-time import of an external repo
-  tag    [-m msg] [-r rev] [-y] [--allow-unpublished] <ext> <tag>
-                                        Tag the external commit for monorepo rev
-  install-hook                          Install the pre-push guard
-  version                               Show the version
+  sync                        Clone missing externals, update .gitignore
+  list                        Show the externals
+  status [--fetch]            Branch, ahead/behind and changes per repo
+  diff [<git diff options>]   Diffs of all repos as one diff
+  add <path>... | -A          Stage, each path in the repo that owns it
+  restore [--staged] <path>...
+  commit [-a] [-m <msg>]      Commit in every repo with the same message
+  commit --continue | --abort Finish or forget an interrupted pit commit
+  commit --amend              Amend the last pit commit
+  log [-n <count>] [--oneline]
+  fetch | pull
+  push [-n] [-i | -y]         Show what each repo would push, ask repo by
+                              repo, then push. Asking is on unless
+                              "settings": {"confirmPush": false}; -y skips
+                              it, -i forces it. A repo that diverged from
+                              its upstream is skipped when asking; without
+                              asking, it stops the whole push.
+  each [--] <git args>        Run any git command in each repo
+  version
 
-Without external names, status, pull and push cover the monorepo and all
-externals; with names, only those externals.
-
-Don't rebase commits containing pit's merges; pit pull always merges.
+Every command covers all repos, wherever you run it; -r <repo>,
+-g <group> or paths narrow it. Groups are assigned per external in the
+config: "groups": ["work", "go"]. Options pit doesn't know are passed on
+to git.
 
 Full documentation: https://github.com/patrickbergner/pit

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Runs go vet and the test suite. Extra arguments go to go test, e.g.
-#   ./run-tests.sh -v -run TestLFS
-# The end-to-end tests in cmd/pit build throwaway monorepos and public repos as local file:// repositories; they need git, and git-lfs for
-# the LFS tests (skipped otherwise).
+# Checks gofmt, runs go vet and the test suite. Extra arguments go to go test, e.g.
+#   ./run-tests.sh -v -run TestCommit
+# The end-to-end tests in cmd/pit build throwaway pit roots and remotes as local file:// repositories; they need git.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"

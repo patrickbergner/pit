@@ -38,10 +38,6 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "Version: $version"
 
-      # See ci.yml for why this is its own step.
-      - name: Require git-lfs
-        run: git lfs version
-
       # The release re-proves everything rather than trusting that CI passed on
       # the same commit.
       - name: Test

@@ -1,8 +1,7 @@
 package main
 
 // Test harness: every test gets a sandbox directory with its own git configuration and local bare repositories reached through file://
-// URLs. The test binary doubles as pit, so commands run by the tests, and by the git hooks they trigger, exercise the real command-line
-// entry point.
+// URLs. The test binary doubles as pit, so the tests exercise the real command-line entry point.
 
 import (
 	"bytes"
@@ -20,8 +19,6 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
-
-var testHaveLFS = exec.Command("git", "lfs", "version").Run() == nil
 
 type sandbox struct {
 	t   *testing.T
@@ -46,11 +43,8 @@ func newSandbox(t *testing.T) *sandbox {
 	gitconfig := "[init]\n\tdefaultBranch = main\n" +
 		"[user]\n\tname = Pit Test\n\temail = pit@example.com\n" +
 		"[core]\n\tautocrlf = false\n" +
+		"[pull]\n\trebase = false\n" +
 		"[protocol \"file\"]\n\tallow = always\n"
-	if testHaveLFS {
-		gitconfig += "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n" +
-			"\tprocess = git-lfs filter-process\n\trequired = true\n"
-	}
 	global := filepath.Join(home, ".gitconfig")
 	if err := os.WriteFile(global, []byte(gitconfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -58,24 +52,22 @@ func newSandbox(t *testing.T) *sandbox {
 	var env []string
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if k = strings.ToUpper(k); strings.HasPrefix(k, "GIT_") || k == "HOME" || k == "PIT_PUSH" {
+		if k = strings.ToUpper(k); strings.HasPrefix(k, "GIT_") || k == "HOME" || k == "EDITOR" || k == "VISUAL" {
 			continue
 		}
 		env = append(env, kv)
 	}
-	// GIT_CLONE_PROTECTION_ACTIVE: git 2.39.4 to 2.45.1 abort a clone when a hook appears during checkout, which git-lfs's smudge filter
-	// does by installing its hooks.
 	env = append(env, "HOME="+home, "GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
-		"GIT_CLONE_PROTECTION_ACTIVE=false", "PIT_TEST_AS_PIT=1")
+		"GIT_EDITOR=false", "PIT_TEST_AS_PIT=1")
 	return &sandbox{t: t, dir: dir, env: env}
 }
 
 func (s *sandbox) path(rel string) string { return filepath.Join(s.dir, filepath.FromSlash(rel)) }
 
-func (s *sandbox) exec(dir, stdin, name string, args ...string) (string, error) {
+func (s *sandbox) exec(dir, stdin string, env []string, name string, args ...string) (string, error) {
 	s.t.Helper()
 	cmd := exec.Command(name, args...)
-	cmd.Dir, cmd.Env = dir, s.env
+	cmd.Dir, cmd.Env = dir, append(append([]string(nil), s.env...), env...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -86,34 +78,31 @@ func (s *sandbox) exec(dir, stdin, name string, args ...string) (string, error) 
 // git runs git in dir and returns its trimmed output; failing fails the test.
 func (s *sandbox) git(dir string, args ...string) string {
 	s.t.Helper()
-	out, err := s.exec(dir, "", "git", args...)
+	out, err := s.exec(dir, "", nil, "git", args...)
 	if err != nil {
 		s.t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(out)
 }
 
-func (s *sandbox) gitFails(dir string, args ...string) string {
+func (s *sandbox) pitEnv(dir string, env []string, args ...string) (string, error) {
 	s.t.Helper()
-	out, err := s.exec(dir, "", "git", args...)
-	if err == nil {
-		s.t.Fatalf("git %s succeeded, want failure\n%s", strings.Join(args, " "), out)
-	}
-	return out
+	return s.pitInput(dir, "", env, args...)
 }
 
-func (s *sandbox) pitIn(dir, stdin string, args ...string) (string, error) {
+// pitInput runs pit with stdin, e.g. answers to its questions.
+func (s *sandbox) pitInput(dir, stdin string, env []string, args ...string) (string, error) {
 	s.t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	return s.exec(dir, stdin, exe, args...)
+	return s.exec(dir, stdin, env, exe, args...)
 }
 
 func (s *sandbox) pit(dir string, args ...string) string {
 	s.t.Helper()
-	out, err := s.pitIn(dir, "", args...)
+	out, err := s.pitEnv(dir, nil, args...)
 	if err != nil {
 		s.t.Fatalf("pit %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -122,7 +111,7 @@ func (s *sandbox) pit(dir string, args ...string) string {
 
 func (s *sandbox) pitFails(dir string, args ...string) string {
 	s.t.Helper()
-	out, err := s.pitIn(dir, "", args...)
+	out, err := s.pitEnv(dir, nil, args...)
 	if err == nil {
 		s.t.Fatalf("pit %s succeeded, want failure\n%s", strings.Join(args, " "), out)
 	}
@@ -137,11 +126,19 @@ func fileURL(path string) string {
 	return "file://" + u
 }
 
-// bare creates an empty bare repo <name>.git and returns its file:// URL.
-func (s *sandbox) bare(name string) string {
+// remote creates the bare repo remotes/<name>.git with one commit holding README.md (none if empty) and returns its file:// URL.
+func (s *sandbox) remote(name string, empty bool) string {
 	s.t.Helper()
-	s.git(s.dir, "init", "-q", "--bare", name+".git")
-	return fileURL(s.path(name + ".git"))
+	bare := s.path("remotes/" + name + ".git")
+	s.git(s.dir, "init", "-q", "--bare", bare)
+	if !empty {
+		work := s.path("seed/" + name)
+		s.git(s.dir, "clone", "-q", fileURL(bare), work)
+		s.write(work, "README.md", name+"\n")
+		s.commitAll(work, "init "+name)
+		s.git(work, "push", "-q", "origin", "main")
+	}
+	return fileURL(bare)
 }
 
 func (s *sandbox) write(dir, rel, content string) {
@@ -164,38 +161,61 @@ func (s *sandbox) read(dir, rel string) string {
 	return string(b)
 }
 
+func (s *sandbox) exists(dir, rel string) bool {
+	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel)))
+	return err == nil
+}
+
 func (s *sandbox) commitAll(dir, msg string) {
 	s.t.Helper()
 	s.git(dir, "add", "-A")
 	s.git(dir, "commit", "-q", "-m", msg)
 }
 
-func (s *sandbox) clone(url, name string) string {
+type ext struct{ name, url, path string }
+
+// config writes pit-externals.json into dir.
+func (s *sandbox) config(dir string, exts ...ext) {
 	s.t.Helper()
-	s.git(s.dir, "clone", "-q", url, name)
-	return s.path(name)
+	var b strings.Builder
+	b.WriteString("{\n  \"externals\": {")
+	for i, e := range exts {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		entry, _ := json.Marshal(map[string]string{"url": e.url, "path": e.path})
+		b.WriteString("\n    \"" + e.name + "\": " + string(entry))
+	}
+	b.WriteString("\n  }\n}\n")
+	s.write(dir, "pit-externals.json", b.String())
 }
 
-type ext struct{ url, path string }
-
-// monorepo creates "mono" with externals.json, pushed to a new bare "origin".
-func (s *sandbox) monorepo(externals map[string]ext) string {
+// root creates the pit root "forge" with the externals; as a git repo with an origin of its own if repo is set. It doesn't sync.
+func (s *sandbox) root(repo bool, exts ...ext) string {
 	s.t.Helper()
-	cfg := map[string]any{}
-	for name, e := range externals {
-		cfg[name] = map[string]string{"url": e.url, "repoPath": e.path}
-	}
-	data, err := json.MarshalIndent(map[string]any{"externals": cfg}, "", "  ")
-	if err != nil {
+	root := s.path("forge")
+	if err := os.MkdirAll(root, 0o755); err != nil {
 		s.t.Fatal(err)
 	}
-	mono := s.path("mono")
-	s.git(s.dir, "init", "-q", "mono")
-	s.write(mono, "externals.json", string(data)+"\n")
-	s.commitAll(mono, "init")
-	s.git(mono, "remote", "add", "origin", s.bare("origin"))
-	s.git(mono, "push", "-q", "-u", "origin", "main")
-	return mono
+	s.config(root, exts...)
+	if repo {
+		s.git(root, "init", "-q")
+		s.write(root, "notes.md", "notes\n")
+		s.commitAll(root, "init forge")
+		s.git(root, "remote", "add", "origin", s.remote("forge", true))
+		s.git(root, "push", "-q", "-u", "origin", "main")
+	}
+	return root
+}
+
+// standard is a synced root repo with externals "a" at a/ and "b" at nested/b.
+func (s *sandbox) standard() string {
+	s.t.Helper()
+	root := s.root(true, ext{"a", s.remote("a", false), "a"}, ext{"b", s.remote("b", false), "nested/b"})
+	s.pit(root, "sync")
+	s.commitAll(root, "track externals")
+	s.git(root, "push", "-q")
+	return root
 }
 
 func contains(t *testing.T, out string, want ...string) {

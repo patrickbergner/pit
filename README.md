@@ -1,25 +1,15 @@
 # pit – Polyrepo Integration Tool
 
-**pit** (Polyrepo Integration Tool) keeps a monorepo and the external repositories in its subdirectories in sync – in both directions,
-without ever handing a repository history that isn't its own.
+**pit** lets you work with a directory tree made of several git repositories as if it were one.
 
-You work in one monorepo. Some of its subdirectories are also standalone repositories (called *externals*). Either side can be public
-or private: open-source libraries published from a closed monorepo, components shared with a customer or another team, or subprojects
-of an open monorepo that also live on their own. `pit` wraps `git subtree` so that:
+You list the repositories in a `pit-externals.json` at the top of the tree. pit clones each of them into its subdirectory as a plain
+clone, and from then on runs the everyday git operations across all of them at once: one `pit status` for the whole tree, one
+`pit commit` that commits in every repo with changes using the same message, one `pit push`.
 
-- `pit push` publishes new commits touching such a directory to its external repo – as commits that contain only that directory, never any
-  other monorepo history;
-- `pit pull` merges contributions made directly in the external repos back into the monorepo;
-- a pre-push hook blocks every push to an external repo that doesn't go through pit.
+Each external stays an ordinary clone. `cd` into one and use git directly whenever you like; pit doesn't mind. pit adds no remotes, hooks,
+refs or files to any repo and never rewrites history. It only runs commands you could have typed yourself in each repo.
 
-The monorepo stays the single source of truth. `pit` is a single native binary with no dependencies besides git.
-
-## Requirements
-
-- `git` on `PATH`, including `git subtree` (part of git's contrib scripts; Git for Windows and most Linux distributions and Homebrew
-  ship it). On Windows, a `git.bat` or `git.cmd` shim on `PATH` is fine: pit runs the `git.exe` from its exec path instead, since cmd.exe
-  would mangle arguments such as `HEAD^{tree}`.
-- `git-lfs`, only if Git LFS is actually used in the monorepo or an external repo. The LFS attribute checks need git ≥ 2.40.
+`pit` is a single native binary with no dependencies besides git.
 
 ## Installation
 
@@ -37,216 +27,332 @@ or build it:
 ./build.sh
 ```
 
+pit needs `git` on `PATH`. On Windows, a `git.bat` or `git.cmd` shim on `PATH` is fine: pit runs the `git.exe` from its exec path instead,
+since cmd.exe would mangle some arguments.
+
 ## Quick start
 
-1. Add `externals.json` at the root of your monorepo:
+1. Create `pit-externals.json` in the directory that should hold the repos:
 
    ```json
    {
      "externals": {
-       "mylib": { "url": "https://github.com/you/mylib.git", "repoPath": "libs/mylib" }
+       "mylib": { "url": "https://github.com/you/mylib.git", "path": "libs/mylib" },
+       "tool":  { "url": "git@github.com:you/tool.git",      "path": "tools/tool" }
      }
    }
    ```
 
-2. Install the guard hook, once per clone (see [Pre-push guard](#pre-push-guard)):
+2. Clone everything:
 
    ```sh
-   pit install-hook
+   pit sync
    ```
 
-3. Bring the two sides together:
-   - The external repo already has commits: `pit add mylib` imports it into `libs/mylib` (the directory must not exist yet).
-   - The external repo is empty: commit `libs/mylib` in the monorepo and `pit push mylib` publishes its history.
+3. Work as usual, then from anywhere in the tree:
 
-4. From then on, work in the monorepo as usual and use `pit status`, `pit pull` and `pit push` instead of `git pull` / `git push`.
+   ```sh
+   pit status
+   pit add -A
+   pit commit -m "Rename the config option everywhere"
+   pit push
+   ```
+
+## The pit root
+
+The directory holding `pit-externals.json` is the **root**. pit finds it by walking up from the current directory, so it works from any
+subdirectory, including from inside an external.
+
+The root can be a git repo itself, or just a plain directory:
+
+```
+forge/                     <- the root; here a git repo itself
+  pit-externals.json
+  .gitignore               <- pit keeps the externals' paths in here
+  .pit/                    <- pit's local state, gitignored
+  README.md                <- belongs to the root repo
+  environment/             <- external "environment"
+  pit/
+    notes.md               <- belongs to the root repo
+    public/                <- external "pit"
+```
+
+pit works on all **externals** in config order, plus the **root repo** if the root is a git repo. The root repo is named `.` and always
+comes last. Every file belongs to the external whose path contains it, otherwise to the root repo (or to no repo, if the root is not a
+git repo).
 
 ## Commands
 
-Run `pit` anywhere inside the monorepo; it finds the root itself.
+Every command covers **all repos, wherever in the tree you run it**, just as git covers the whole repo from any subdirectory. You can narrow
+that down:
+
+- `-r <repo>` selects a repo by name; `-r .` is the root repo.
+- `-g <group>` selects the externals in a [group](#groups).
+- Paths select the repos owning them. A directory covers every external below it, so `pit add .` at the root stages in all repos, and
+  `pit status libs` shows only the repos under `libs/`.
+
+`-r` and `-g` can be repeated and combined, and select the repos matching any of them: `pit commit -g libs -r . -m "..."` commits in the
+`libs` externals and the root repo. Paths together with `-r` or `-g` select only the selected repos owning those paths.
+
+Paths in output are relative to the current directory, like git prints them. Options pit doesn't know itself are passed on to git, e.g.
+`pit diff --staged`, `pit pull --rebase`, `pit push --force-with-lease`. Give git options their value in the same argument
+(`--source=HEAD~1`, `-U5`).
 
 | Command | What it does |
 |---|---|
-| `pit list` | Show the configured externals |
-| `pit status [--no-fetch] [ext...]` | Commits waiting to be pushed / pulled, for the monorepo and each external |
-| `pit pull [ext...]` | Merge the monorepo's upstream first, then new external commits into each `repoPath` |
-| `pit push [-n] [-y] [ext...]` | Show the complete plan, ask once, then push: monorepo first, then the external repos |
-| `pit add (ext... \| --all)` | First-time import of an external repo into its `repoPath` |
-| `pit tag [-m msg] [-r rev] [-y] [--allow-unpublished] <ext> <tag>` | Tag the external commit for monorepo revision `rev` (default `HEAD`) |
-| `pit install-hook` | Install the pre-push guard |
+| `pit sync` | Clone missing externals, check existing ones, update the root's `.gitignore` |
+| `pit list` | The externals with path, branch, groups and URL, and whether they are cloned |
+| `pit status [--fetch]` | Branch, ahead/behind and changed files per repo |
+| `pit diff [<options>]` | The diffs of all repos, as one diff of the whole tree |
+| `pit add <path>...` / `pit add -A` | Stage, each path in the repo that owns it |
+| `pit restore [--staged] <path>...` | Unstage or discard changes, routed the same way |
+| `pit commit [-a] [-m <msg>]... [-F <file>] [-n]` | Commit in every repo with something to commit, all with the same message |
+| `pit commit --continue` / `--abort` | Finish, or forget, a pit commit that stopped halfway |
+| `pit commit --amend [-a] [-m <msg> \| --no-edit]` | Amend the last pit commit |
+| `pit log [-n <count>] [--oneline]` | One log across all repos |
+| `pit fetch` | Fetch all repos |
+| `pit pull` | Pull all repos that have an upstream |
+| `pit push [-n] [-i \| -y]` | Show what each repo would push, ask repo by repo, then push |
+| `pit each [--] <git args>` | Run any git command in each repo |
 | `pit version` | Show the version |
 
-**Without external names**, `status`, `pull` and `push` cover the monorepo *and* all externals. **With names**, they cover only those
-externals and leave the monorepo's upstream alone. (`push` still records its bookkeeping merges locally; they go out with the next full
-`pit push`.)
+`status`, `log` and `fetch` work on the repos in parallel. Everything that changes something runs repo by repo, in config order, root
+last, and holds a lock (`.pit/lock`) so two pit commands don't interleave.
+
+### `pit sync`
+
+For each external:
+
+- **Directory missing or empty:** clones it, checking out the configured branch. An empty remote repo is cloned too, with that branch
+  started.
+- **Already a git repo:** checks that its `origin` is the configured URL (`https://`, `ssh://` and `git@host:path` spellings and a
+  trailing `.git` don't matter) and warns if not. Nothing is changed.
+- **Exists, but isn't empty and isn't a repo:** an error for this external. pit never overwrites or adopts content.
+
+Then it updates the root repo's `.gitignore` (see [below](#keeping-the-externals-out-of-the-root-repo)). An external removed from the config
+is reported, and its directory is left as it is.
+
+To add or remove an external, edit `pit-externals.json` and run `pit sync`. If the root is a git repo, commit the config together with
+`.gitignore`.
+
+All other commands warn when an external isn't cloned yet or the `.gitignore` is out of date. `pit add` refuses to stage in the root repo
+until `pit sync` has fixed the `.gitignore`, since the root repo would otherwise pick up the externals' clones.
+
+### `pit status`
+
+```
+$ pit status
+pit    main        ↑2 ↓1
+   M pit/public/cmd/pit/main.go
+  ?? pit/public/concept.md
+bond   feature/x   (expected main)
+   M bond/public/README.md
+.      main        ↑1
+   M pit-externals.json
+9 more repos clean and up to date
+```
+
+Per repo: name, branch, commits ahead (↑) and behind (↓) its upstream, and the changed files in `git status --short` format. Notes point
+out what's unusual: a branch other than the configured one, a detached HEAD, a merge or rebase in progress, a missing or deleted upstream,
+a repo without commits. Clean repos with nothing to note are summed up in the last line.
+
+Ahead/behind are as of the last fetch. `--fetch` fetches first; pit also mentions it when the last fetch is more than a day old.
+
+### `pit diff`
+
+Runs `git diff` in every repo and prefixes each repo's paths with its location below the root (`a/pit/public/cmd/pit/main.go`), so the
+output reads like one diff of the whole tree. `--staged`, `--stat`, `--exit-code` and other diff options are passed on. pit doesn't
+start a pager; pipe the output into one if you like.
+
+### `pit commit`
+
+The core of pit: one message, one commit per repo.
+
+1. **Collect.** The repos with staged changes, or with `-a`, with changes to tracked files. If there are none, pit says so.
+2. **Check**, before anything is committed: no repo may have a detached HEAD, unresolved conflicts or an operation (merge, rebase, ...)
+   in progress, and a git identity must be configured. All problems are listed at once, and nothing is committed.
+3. **Message.** From `-m` (several are joined as paragraphs, as with git), `-F <file>`, or from git's editor, opened once with a list
+   of the changes in every repo.
+4. **Commit** in each repo, one after the other, root last. Each repo's own hooks run as usual; `-n` (`--no-verify`) skips them.
+5. **Report** one line per repo: name, branch, commit.
+
+The commits are independent. There is no cross-repo atomicity, and pit doesn't pretend there is. If a commit fails halfway, typically
+because of a hook, pit stops and lists what was committed and what wasn't. Fix the problem, then
+
+```sh
+pit commit --continue
+```
+
+commits the remaining repos with the same message. `pit commit --abort` forgets the interrupted commit instead; the commits already made
+stay.
+
+**Amending.** pit remembers the commits of the last pit commit. `pit commit --amend` amends exactly those, offering their message in the
+editor (or takes `-m`, or keeps it with `--no-edit`). Repos with newly staged changes that weren't part of it get a fresh commit with the
+same message. pit refuses if one of the repos has moved on since, or the commit has already been pushed there. To amend anything else, use
+git in that repo.
+
+In the repos, nothing links the commits of one pit commit besides their message, author and time.
+
+### `pit log`
+
+Merges the logs of all repos, newest first, 20 entries unless you give `-n <count>` (or `-<count>`):
+
+```
+commit pit 1a2b3c4, bond 5d6e7f8, . 9a8b7c6
+Author: You <you@example.com>
+Date:   Sat Nov 14 10:23:45 2026 +0100
+
+    Rename the config option everywhere
+```
+
+Commits in different repos with the same author and message, made within ten minutes of each other, are shown as one entry: what
+`pit commit` produced. The grouping comes from the histories alone, so it looks the same on every machine and for commits made with git.
+`--oneline` shows one line per entry. Paths narrow the log, as with `git log -- <path>`.
+
+### `pit fetch`, `pit pull`
+
+`pit fetch` fetches all repos in parallel. Terminal prompts for credentials are disabled while doing so; credential helpers work as usual.
+
+`pit pull` runs `git pull` in every repo that has an upstream, honoring your git config (`pull.rebase`, `pull.ff`); `--rebase`,
+`--ff-only` and other options are passed on. A repo that fails, e.g. with a conflict or local changes in the way, doesn't stop the others.
+The summary lists what needs attention, and you resolve it in that repo with git.
 
 ### `pit push`
 
-`push` works in two phases. First it fetches, splits and checks everything without changing anything, and prints a plan: the monorepo
-commits to push and, for every external, **every commit message that is about to be published to its external repo**. Problems (an external
-repo with commits the monorepo doesn't have yet, LFS mismatches, …) are all reported at once. Only after you confirm does it upload LFS
-objects, push the monorepo and then each external repo.
+`pit push` fetches first, then shows the plan: for each repo the branch, where it goes, and the commits about to be pushed. A repo that has
+diverged from its upstream is marked `(can't push)`, since git would reject its push; `pit pull` it first. (Passing `--force`,
+`--force-with-lease` or `--force-if-includes` lifts that check.)
 
-- `-n`, `--dry-run` shows the plan and stops.
-- `-y`, `--yes` skips the confirmation.
+Next, pit asks repo by repo whether to push it. Repos that can't be pushed are skipped, and you're still asked about all the others:
 
-Uncommitted changes are not pushed – `push` pushes `HEAD` and warns if the worktree is dirty. Since commit messages are published as they
-are, write them for the external repo's audience when a commit touches an external, or keep other changes in separate commits.
-
-### `pit pull`
-
-Requires a clean worktree. Merges the upstream of the current branch first, then each external's branch into its `repoPath`. It always
-merges, never rebases – see [Don't rebase](#dont-rebase).
-
-### `pit tag`
-
-Creates an annotated tag on the external commit that corresponds to a monorepo revision and pushes it to the external repo:
-
-```sh
-pit tag -m "Release 1.2.0" mylib v1.2.0
+```
+(1/3) Push pit: main -> origin/main, 2 commits? [y,n,a,q,?] y
+(2/3) Push bond: feature/x -> origin/feature/x, 1 commit? [y,n,a,q,?] n
+(3/3) Push .: main -> origin/main, 1 commit? [y,n,a,q,?] y
 ```
 
-In the monorepo the tag is stored as `mylib/v1.2.0`, so tags of different externals (and your monorepo's own tags) don't collide; the
-external repo gets plain `v1.2.0`. By default the commit must already be published; `--allow-unpublished` publishes it along with the tag.
+`y` pushes the repo, `n` skips it, `a` pushes it and all remaining ones, `q` skips it and all remaining ones. All questions come before the
+first push, so you can still change your mind by answering `q` or pressing Ctrl-C: nothing has been pushed until the last answer.
+Without an answer (stdin closed), pit pushes nothing.
+
+Asking is on by default. `"confirmPush": false` in the [settings](#configuration) turns it off, and on the command line `-y` (`--yes`)
+pushes without asking and `-i` (`--interactive`) asks, whatever the config says. **Without asking, a repo that can't be pushed stops
+the whole push**: nobody chose to leave it behind, and related commits in the other repos shouldn't go out without it. `pit push -i`
+lets you push the others anyway.
+
+Then it pushes the chosen repos one by one, root last. If one fails, pit stops and lists what was pushed and what wasn't. A branch without
+upstream is pushed to `origin` with `-u`. `-n` (`--dry-run`) shows the plan only, without asking. pit exits with an error whenever a repo
+was left out because of a problem, so a partial push never looks complete.
+
+### `pit each`
+
+The escape hatch for everything pit doesn't wrap:
+
+```sh
+pit each -- switch -c feature/x
+pit each -r mylib -r tool -- tag v1.0
+pit each stash
+```
+
+Runs the git command in each repo, its output under a header per repo, and fails if it failed anywhere.
 
 ## Configuration
 
-`externals.json` at the monorepo root:
+`pit-externals.json`:
 
 ```json
 {
   "settings": {
     "defaultBranch": "main",
-    "remotePrefix": "pit-"
+    "confirmPush": true
   },
   "externals": {
-    "mylib": { "url": "https://github.com/you/mylib.git", "repoPath": "libs/mylib" },
-    "tool":  { "url": "git@github.com:you/tool.git", "repoPath": "tools/tool", "branch": "master" }
+    "mylib": { "url": "https://github.com/you/mylib.git", "path": "libs/mylib", "groups": ["libs", "go"] },
+    "tool":  { "url": "git@github.com:you/tool.git",      "path": "tools/tool", "branch": "master" }
   }
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `settings.defaultBranch` | External repo branch used when an external sets none (default `main`) |
-| `settings.remotePrefix` | Prefix of the git remotes pit manages (default `pit-`) |
-| `externals.<name>` | Name used on the command line; letters, digits, `.`, `_`, `-` |
-| `url` | The external repo (required) |
-| `repoPath` | Directory in the monorepo (required) |
-| `branch` | Branch in the external repo (optional) |
+| `settings.defaultBranch` | Branch of externals that set none (default `main`) |
+| `settings.confirmPush` | Whether `pit push` asks repo by repo before pushing (default `true`); `-y` / `-i` override it |
+| `externals.<name>` | Name used with `-r` and in output; letters, digits, `.`, `_`, `-` |
+| `url` | Clone URL (required) |
+| `path` | Directory relative to the root, with forward slashes (required) |
+| `branch` | Branch `pit sync` checks out, and that `pit status` expects (optional) |
+| `groups` | Names of the groups the external belongs to, for `-g` (optional) |
 
-Unknown keys are rejected, so a typo fails loudly instead of being ignored. The whole `settings` object is optional.
+The externals keep the order they have in the file. Unknown keys are rejected, so a typo fails loudly instead of being ignored. Paths must
+stay inside the root, must be unique, and an external can't lie inside another one. The whole `settings` object is optional.
 
-For each external, pit creates and updates a git remote `<remotePrefix><name>` (e.g. `pit-mylib`). These remotes are fetched without tags
-and only for their one branch, so the external repos' tags never end up in the monorepo's tag namespace.
+### Groups
 
-## Pre-push guard
+An external can belong to any number of groups. There is nothing to declare: a group exists once some external lists it. Group names
+use the same characters as external names, and an unknown group on the command line is an error that lists the existing ones.
 
-An external's remote sits right next to the monorepo's, and one careless `git push pit-mylib main` would hand the external repo the whole
-monorepo history. `pit install-hook` installs a pre-push hook that blocks every push whose URL matches one of the externals, unless pit
-itself is doing the push.
-
-- URLs are compared after normalization, so `https://`, `ssh://` and `git@host:path` spellings, trailing `.git`, local paths and `file://`
-  URLs all match.
-- The hook contains the absolute path of the pit binary. If pit can't be found, the hook **fails closed** and blocks all pushes. After
-  moving the binary, run `pit install-hook` again.
-- An existing pre-push hook is kept as `pre-push.pit-chained` and runs after the guard with the same arguments and input. In repos using Git
-  LFS, the LFS hook is set up and chained automatically.
-- Running `pit install-hook` again is safe.
-
-Hooks are not cloned, so install it in every clone of the monorepo.
-
-## Git LFS
-
-pit works with and without Git LFS, in the monorepo and in each external repo. Files are published exactly as they are committed (LFS
-pointer or regular file); pit makes sure the LFS objects travel along with the pointers, uploading them itself before any ref is pushed.
-
-The catch: an external repo only sees the `.gitattributes` inside its `repoPath`, not the ones at the monorepo root or in directories above.
-A file stored in LFS because of a root rule would show up as a bare pointer file in the external repo. `pit push` therefore checks every
-file of an external against the external repo's own attributes and refuses to push on a mismatch; it also warns if the monorepo's attributes
-would store a file differently than the external repo expects.
-
-To fix a mismatch, make `<repoPath>/.gitattributes` self-contained – either track the patterns there, or opt out of all inherited rules with
-this as its first line:
-
-```
-* !filter !diff !merge
-```
-
-then re-store the files and commit:
+`-g <group>` works with every command:
 
 ```sh
-git add --renormalize libs/mylib
-git commit -m "Store libs/mylib files as its .gitattributes say"
+pit sync -g work                     # clone only the work repos
+pit status -g libs
+pit commit -g libs -m "Bump the Go version"
+pit each -g go -- tag v1.4.0
 ```
 
-`pit pull` and `pit add` fetch the LFS objects of incoming external commits from the external repo before merging.
+The root repo belongs to no group; add `-r .` to include it. Externals of a group that aren't cloned yet are left out, except by
+`pit sync`, `pit list` and `pit status`, which deal with them.
 
-### Let each external own its LFS rules
+## Keeping the externals out of the root repo
 
-The monorepo and its externals will usually track different file types in LFS. Only one direction causes trouble: a pattern tracked by the
-monorepo's root attributes but not by the external's own. The other direction is harmless, since the external's rule lives inside
-`repoPath` and applies on both sides.
-
-To keep the monorepo's rules out of all externals for good, start the `.gitattributes` of every external repo with the opt-out line and
-list its own patterns below it:
+If the root is a git repo, `pit sync` maintains a block in its `.gitignore`:
 
 ```
-* !filter !diff !merge
-*.png filter=lfs diff=lfs merge=lfs -text
+# >>> pit externals - managed by pit, do not edit
+/.pit/
+/environment/
+/pit/public/
+# <<< pit externals
 ```
 
-The root rules then only apply to the monorepo's own directories. In the external repo itself the line has no effect, since there's
-nothing to inherit.
+- The entries are exact, anchored paths: `pit/notes.md` stays part of the root repo while `pit/public/` is ignored.
+- Only the block is rewritten; the rest of the file stays as it is.
+- It's `.gitignore` rather than `.git/info/exclude` because it is versioned and works in every clone of the root repo.
+- An ignore rule doesn't affect files that are already tracked. If the root repo tracks files in an external's path, `pit sync` refuses to
+  clone that external and tells you how to untrack them.
 
-### Fixing a mismatch before the first import
+## Local state
 
-`pit add` warns about a mismatch right after the import. Fixing it with `git add --renormalize` only applies from that commit on; the
-external's history keeps the files as regular blobs. To move them into LFS retroactively, rewrite the external's history before the
-monorepo depends on it – that is, as long as the import commit hasn't been pushed:
+pit keeps a few files in `.pit/` next to `pit-externals.json`. The directory is local to your checkout and gitignored.
 
-```sh
-# in the monorepo: drop the import (HEAD is pit's subtree merge)
-git reset --hard HEAD^
+| File | Purpose |
+|---|---|
+| `COMMIT_EDITMSG` | The message of the latest pit commit; survives a failed commit for `--continue` |
+| `commit-in-progress.json` | Which repos of an interrupted pit commit are done, and which are still to do |
+| `last-commit.json` | The commits of the last pit commit, for `--amend` |
+| `lock` | Held while a command changes something |
 
-# in a separate clone of the external repo (check out other branches locally first so --everything covers them)
-git lfs migrate import --include="*.cdr" --everything
-git push --force --all origin
-git push --force --tags origin
+None of it is needed to understand the repos. Deleting `.pit` loses at most an interrupted commit's progress and the ability to amend the
+last pit commit through pit. Since you may use git directly at any time, pit checks what it recorded against the repos before acting on
+it. A `lock` left behind by a crashed pit can simply be deleted.
 
-# back in the monorepo
-pit add mylib
-```
+## What pit deliberately doesn't do
 
-`git lfs migrate import` also adds the pattern to `.gitattributes` in every rewritten commit, so the imported `repoPath` is self-contained.
-Other clones of the external repo must be re-cloned or hard-reset after the force push.
-
-Once an external has been imported and pushed, don't rewrite its history: the split and rejoin commits (see [How it works](#how-it-works))
-tie the monorepo to the external's commit IDs. From then on, fix mismatches going forward with `git add --renormalize` as shown above.
-
-## How it works
-
-- **Split.** `git subtree split` turns the history of `repoPath` into a history containing only that directory. It is deterministic: the
-  same monorepo revision always gives the same split commit, which is how `status`, `pull`, `push` and `tag` match both sides.
-- **Rejoin.** After publishing, pit records a merge commit on `HEAD` that joins the published split commit (like
-  `git subtree split --rejoin`; the tree is unchanged). Without it, later pulls would conflict with your own published changes, and every
-  split would walk the full history.
-- **Push order.** LFS objects first, then the monorepo, then the external repos. If a push fails, pit says what has already been pushed.
-
-### Don't rebase
-
-The rejoin and subtree merge commits are what connect the monorepo to the external histories. Rebasing flattens them, which leads to
-conflicts and diverging split commits. Use `pit pull` (it merges), and don't rebase commits that contain pit's merges.
+- **No pinning.** The root repo doesn't record which commits of the externals belong together; externals follow their branches. A fresh
+  `pit sync` gives you the current tip of every external, not a reproducible snapshot.
+- **No atomicity** across repos for commit, pull or push, only checks up front that catch the foreseeable failures.
+- **No branch management** beyond reporting; `pit each -- switch ...` does the job.
+- **No special handling** for Git LFS, submodules, hooks or tags. Each clone has its own setup, and git deals with it.
 
 ## Development
 
 ```sh
-./run-tests.sh                   # gofmt check, go vet, go test ./...
-./run-tests.sh -v -run TestLFS   # extra arguments go to go test
+./run-tests.sh                      # gofmt check, go vet, go test ./...
+./run-tests.sh -v -run TestCommit   # extra arguments go to go test
 ```
 
-The end-to-end tests build throwaway monorepos and external repos as local `file://` repositories in temp directories; they never touch the
-network. They need git, and git-lfs for the LFS tests (skipped otherwise). pit uses the Go standard library only.
+The end-to-end tests in `cmd/pit` build throwaway pit roots and remote repositories as local `file://` repositories in temp directories;
+they never touch the network and need only git. pit uses the Go standard library only.
 
 ## License
 

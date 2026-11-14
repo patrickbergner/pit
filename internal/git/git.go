@@ -1,4 +1,5 @@
-// Package git runs the git command line. Failures come back as *Error, which carries what git printed on stderr.
+// Package git runs the git command line in a given repository directory. Failures come back as *Error, which carries what git printed on
+// stderr.
 package git
 
 import (
@@ -9,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -55,14 +55,27 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// Raw runs git with stdin (may be nil) and returns its stdout.
-func Raw(stdin io.Reader, args ...string) ([]byte, error) {
+// command builds git args run in dir ("" for the current directory) with env added to ours.
+func command(dir string, env []string, args []string) (*exec.Cmd, error) {
 	bin, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	return cmd, nil
+}
+
+// Raw runs git in dir with stdin (may be nil) and returns its stdout.
+func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
+	cmd, err := command(dir, nil, args)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
 	var out, errb bytes.Buffer
-	cmd := exec.Command(bin, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &out, &errb
 	if err := cmd.Run(); err != nil {
 		return out.Bytes(), &Error{args, errb.String(), err}
@@ -70,66 +83,48 @@ func Raw(stdin io.Reader, args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Output runs git and returns its stdout without trailing newlines.
-func Output(args ...string) (string, error) {
-	out, err := Raw(nil, args...)
+// Output runs git in dir and returns its stdout without trailing newlines.
+func Output(dir string, args ...string) (string, error) {
+	out, err := Raw(dir, nil, args...)
 	return strings.TrimRight(string(out), "\n"), err
 }
 
 // Input is Output with the given stdin.
-func Input(stdin string, args ...string) (string, error) {
-	out, err := Raw(strings.NewReader(stdin), args...)
+func Input(dir, stdin string, args ...string) (string, error) {
+	out, err := Raw(dir, strings.NewReader(stdin), args...)
 	return strings.TrimRight(string(out), "\n"), err
 }
 
 // OK reports whether git exits with status 0.
-func OK(args ...string) bool {
-	_, err := Raw(nil, args...)
+func OK(dir string, args ...string) bool {
+	_, err := Raw(dir, nil, args...)
 	return err == nil
 }
 
-// Code returns git's exit status; the error is for git not running at all.
-func Code(args ...string) (int, error) {
-	_, err := Raw(nil, args...)
-	var exit *exec.ExitError
-	switch {
-	case err == nil:
-		return 0, nil
-	case errors.As(err, &exit):
-		return exit.ExitCode(), nil
-	default:
-		return -1, err
+// Combined runs git in dir without a terminal: no stdin, interactive credential prompts disabled, stdout and stderr captured together. It
+// is for commands that run in parallel, whose output is printed afterwards.
+func Combined(dir string, args ...string) ([]byte, error) {
+	cmd, err := command(dir, []string{"GIT_TERMINAL_PROMPT=0"}, args)
+	if err != nil {
+		return nil, &Error{args, "", err}
 	}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return out.Bytes(), &Error{args, "", err}
+	}
+	return out.Bytes(), nil
 }
 
-// Pass runs git with its output going straight to the user; env is added to ours.
-func Pass(env []string, args ...string) error {
-	bin, err := Path()
+// Pass runs git in dir attached to the terminal: stdin, stdout and stderr are pit's own.
+func Pass(dir string, args ...string) error {
+	cmd, err := command(dir, nil, args)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(bin, args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if env != nil {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w", args[0], err)
+		return &Error{args, "", err}
 	}
 	return nil
-}
-
-// RevParse resolves rev to an object name.
-func RevParse(rev string) (string, error) { return Output("rev-parse", "--verify", "-q", rev) }
-
-// IsAncestor reports whether commit a is an ancestor of (or equal to) commit b.
-func IsAncestor(a, b string) bool { return OK("merge-base", "--is-ancestor", a, b) }
-
-// RevCount counts the commits in a revision range.
-func RevCount(rng string) (int, error) {
-	out, err := Output("rev-list", "--count", rng)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(out)
 }
