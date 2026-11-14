@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHelpVersionAndUnknownCommand(t *testing.T) {
@@ -179,7 +180,11 @@ func TestCommitAcrossRepos(t *testing.T) {
 	// -a commits tracked changes, not untracked files
 	s.write(root, "nested/b/README.md", "changed\n")
 	s.write(root, "nested/b/untracked.txt", "u\n")
-	s.pit(root, "commit", "-am", "Change b")
+	// commit times have a resolution of one second; date this commit later so the log's order across repos is defined
+	later := "GIT_COMMITTER_DATE=" + time.Now().Add(time.Minute).Format(time.RFC3339)
+	if out, err := s.pitEnv(root, []string{later}, "commit", "-am", "Change b"); err != nil {
+		t.Fatalf("pit commit -am: %v\n%s", err, out)
+	}
 	if got := s.git(s.path("forge/nested/b"), "status", "--porcelain"); got != "?? untracked.txt" {
 		t.Errorf("b status after -a: %q", got)
 	}
