@@ -37,6 +37,7 @@ Setup:
   sync                      Clone missing externals, check the others, and
                             keep them out of the root repo via .gitignore
   list                      Show the externals and whether they are cloned
+  tree                      Show the externals in the directory tree
 
 Changes:
   status [--fetch]          Branch, ahead/behind and changed files per repo
@@ -115,6 +116,7 @@ type command struct {
 var commands = map[string]command{
 	"sync":    {run: cmdSync, locks: true},
 	"list":    {run: cmdList},
+	"tree":    {run: cmdTree},
 	"status":  {run: cmdStatus, checks: true, listsMissing: true},
 	"diff":    {run: cmdDiff, checks: true},
 	"add":     {run: cmdAdd, checks: true, locks: true},

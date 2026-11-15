@@ -34,12 +34,30 @@ func TestSyncClonesAndIgnores(t *testing.T) {
 	root := s.root(true, ext{"a", s.remote("a", false), "a"}, ext{"b", s.remote("b", false), "nested/b"}, ext{"e", empty, "e"})
 	s.write(root, ".gitignore", "*.log\n")
 
-	// a block per repo: branch and URL; the root repo's block holds the root directory
-	contains(t, s.pit(root, "list"), block("a", "main  "+fileURL(s.path("remotes/a.git"))+"  (not cloned)\n\n"), block("b (nested/b)", "main  "), "  (not cloned)\n\n",
-		block("(pit root)", root+"\n\n"), "3 externals, 3 not cloned (pit sync)\n")
+	// the root directory, then a table with a row per external; a path column, as b's path isn't its name
+	out := s.pit(root, "list")
+	contains(t, out, "(pit root) "+root+"\n╭", "│ Name │ Path     │ Branch │ State      │ URL ",
+		"│ a    │ a        │ main   │ not cloned │ "+fileURL(s.path("remotes/a.git")), "│ b    │ nested/b │ main   │ not cloned │ ",
+		"╯\n3 externals, 3 not cloned (pit sync)\n")
+	lacks(t, out, "Groups")
+	// the root directory, then the directories down to the externals and their siblings (not gone into; .git left out), sorted, with what
+	// follows the externals aligned
+	for _, d := range []string{"tools/x", "nested/other"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contains(t, s.pit(root, "tree"), root+" (pit root)\n"+
+		"├── a      main  not cloned\n"+
+		"├── e      main  not cloned\n"+
+		"├── nested\n"+
+		"│   ├── b  main  not cloned\n"+
+		"│   └── other\n"+
+		"└── tools\n"+
+		"3 externals, 3 not cloned (pit sync)\n")
 	contains(t, s.pit(root, "status"), "not cloned (pit sync)")
 
-	out := s.pit(root, "sync")
+	out = s.pit(root, "sync")
 	contains(t, out, block("a", "Cloning into 'a'...\n"), block("b (nested/b)", "Cloning into 'nested/b'...\n"),
 		block("(pit root)", "pit: updated .gitignore"))
 	// plain clones: git works in them as usual
@@ -492,13 +510,22 @@ func TestGroups(t *testing.T) {
 	out := s.pit(root, "sync", "-g", "go")
 	contains(t, out, block("a", "Cloning into 'a'"))
 	lacks(t, out, "─── b", "─── c")
-	// groups are padded alike, so that the URLs line up
+	// a groups column, padded like the others; no path column, as each path is the external's name
 	out = s.pit(root, "list")
-	contains(t, out, block("a", "main  [libs, go]  file://"), block("b", "main  [libs]      file://"), block("c", "main              file://"),
-		"(not cloned)", "3 externals, 2 not cloned (pit sync); groups: libs, go\n")
+	contains(t, out, "│ Name │ Branch │ Groups   │ State      │ URL ", "│ a    │ main   │ libs, go │ cloned     │ file://",
+		"│ b    │ main   │ libs     │ not cloned │ file://", "│ c    │ main   │          │ not cloned │ file://",
+		"3 externals, 2 not cloned (pit sync); groups: libs, go\n")
+	lacks(t, out, "Path")
 	out = s.pit(root, "list", "-g", "libs")
-	contains(t, out, block("a", ""), block("b", ""), "2 externals")
-	lacks(t, out, "─── c", "(pit root)")
+	contains(t, out, "│ a ", "│ b ", "2 externals")
+	lacks(t, out, "│ c ", "(pit root)")
+	// tree: a groups column too, and only the selected externals
+	out = s.pit(root, "tree", "-g", "libs")
+	contains(t, out, root+" (pit root)\n"+
+		"├── a  main  libs, go  cloned\n"+
+		"└── b  main  libs      not cloned\n"+
+		"2 externals, 1 not cloned (pit sync); groups: libs, go\n")
+	lacks(t, out, "── c")
 
 	// status lists the group's uncloned members; other commands leave them out
 	out = s.pit(root, "status", "-g", "libs")

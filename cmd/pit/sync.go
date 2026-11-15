@@ -179,72 +179,101 @@ func normalizeURL(u string) string {
 	return strings.ToLower(strings.TrimRight(u, "/"))
 }
 
-// cmdList shows the configured externals, a block each with branch, groups and URL aligned across the blocks, then the root repo's block
-// with the root directory, and a summary.
-func cmdList(w *workspace.Workspace, args []string) error {
-	p, err := parseArgs("list", args, spec{noPaths: true})
+// selection reads the arguments of list and tree, which take -r and -g but no paths, and returns the selected repos: all by default.
+func selection(w *workspace.Workspace, cmd string, args []string) ([]*workspace.Repo, error) {
+	p, err := parseArgs(cmd, args, spec{noPaths: true})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	repos := w.All()
 	if p.narrowed() {
-		if repos, err = w.Match(p.repos, p.groups); err != nil {
-			return err
-		}
+		return w.Match(p.repos, p.groups)
 	}
-	if len(w.Externals) == 0 {
-		fmt.Println("no externals configured in", w.Root)
+	return w.All(), nil
+}
+
+// cloneState shows whether an external is cloned.
+func cloneState(r *workspace.Repo) string {
+	if r.Cloned() {
+		return ui.Green("cloned")
 	}
-	branchW, groupsW := 0, 0
-	for _, r := range repos {
-		if !r.IsRoot() {
-			branchW, groupsW = max(branchW, len(r.Ext.Branch)), max(groupsW, len(groupList(r)))
-		}
-	}
-	exts, uncloned := 0, 0
+	return ui.Yellow("not cloned")
+}
+
+// externalsSummary sums up the externals list and tree showed: how many, how many of them aren't cloned, and their groups.
+func externalsSummary(exts []*workspace.Repo) string {
+	uncloned := 0
 	var groups []string
-	for _, r := range repos {
-		header(r)
-		if r.IsRoot() {
-			fmt.Println(w.Root)
-			ui.End()
-			continue
-		}
-		line := ui.Green(ui.Pad(r.Ext.Branch, branchW)) + "  "
-		if groupsW > 0 {
-			line += ui.Cyan(ui.Pad(groupList(r), groupsW)) + "  "
-		}
-		line += r.Ext.URL
+	for _, r := range exts {
 		if !r.Cloned() {
-			line += "  " + ui.Yellow("(not cloned)")
 			uncloned++
 		}
-		fmt.Println(line)
-		ui.End()
-		exts++
 		for _, g := range r.Ext.Groups {
 			if !slices.Contains(groups, g) {
 				groups = append(groups, g)
 			}
 		}
 	}
-	if exts > 0 {
-		summary := ui.Plural(exts, "external")
-		if uncloned > 0 {
-			summary += fmt.Sprintf(", %d not cloned (pit sync)", uncloned)
-		}
-		if len(groups) > 0 {
-			summary += "; groups: " + strings.Join(groups, ", ")
-		}
-		fmt.Println(summary)
+	summary := ui.Plural(len(exts), "external")
+	if uncloned > 0 {
+		summary += fmt.Sprintf(", %d not cloned (pit sync)", uncloned)
 	}
-	return nil
+	if len(groups) > 0 {
+		summary += "; groups: " + strings.Join(groups, ", ")
+	}
+	return summary
 }
 
-// groupList shows an external's groups as "[a, b]".
-func groupList(r *workspace.Repo) string {
-	if len(r.Ext.Groups) == 0 {
-		return ""
+// cmdList shows the root directory, the selected externals in a table with path, branch, groups, whether they are cloned and URL, and a
+// summary.
+func cmdList(w *workspace.Workspace, args []string) error {
+	repos, err := selection(w, "list", args)
+	if err != nil {
+		return err
 	}
-	return "[" + strings.Join(r.Ext.Groups, ", ") + "]"
+	if len(w.Externals) == 0 {
+		fmt.Println("no externals configured in", w.Root)
+		return nil
+	}
+	// the path and groups columns only when there is something to show in them
+	showPath, showGroups := false, false
+	for _, r := range repos {
+		if !r.IsRoot() {
+			showPath = showPath || r.Path != r.Name
+			showGroups = showGroups || len(r.Ext.Groups) > 0
+		}
+	}
+	titles := []string{"Name"}
+	if showPath {
+		titles = append(titles, "Path")
+	}
+	titles = append(titles, "Branch")
+	if showGroups {
+		titles = append(titles, "Groups")
+	}
+	titles = append(titles, "State", "URL")
+
+	var exts []*workspace.Repo
+	var rows [][]string
+	for _, r := range repos {
+		if r.IsRoot() {
+			fmt.Println(ui.BoldCyan(r.Label()) + " " + w.Root)
+			continue
+		}
+		row := []string{ui.BoldCyan(r.Label())}
+		if showPath {
+			row = append(row, r.Path)
+		}
+		row = append(row, ui.Green(r.Ext.Branch))
+		if showGroups {
+			row = append(row, ui.Cyan(strings.Join(r.Ext.Groups, ", ")))
+		}
+		rows = append(rows, append(row, cloneState(r), r.Ext.URL))
+		exts = append(exts, r)
+	}
+	if len(exts) == 0 {
+		return nil
+	}
+	ui.Table(titles, rows)
+	fmt.Println(externalsSummary(exts))
+	return nil
 }

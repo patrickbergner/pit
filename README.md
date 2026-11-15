@@ -101,7 +101,8 @@ Paths in output are relative to the current directory, like git prints them. Opt
 | Command | What it does |
 |---|---|
 | `pit sync` | Clone missing externals, check existing ones, update the root's `.gitignore` |
-| `pit list` | The externals with path, branch, groups and URL, and whether they are cloned; the root directory |
+| `pit list` | A table of the externals with path, branch, groups, whether they are cloned and URL; the root directory |
+| `pit tree` | The directories from the root down to the externals and their siblings, with branch, groups and whether the externals are cloned |
 | `pit status [--fetch]` | Branch, ahead/behind and changed files per repo |
 | `pit diff [<options>]` | The diffs of all repos, as one diff of the whole tree |
 | `pit add <path>...` / `pit add -A` | Stage, each path in the repo that owns it |
@@ -140,7 +141,7 @@ Fast-forward
 
 ```
 
-`list`, `sync`, `status`, `fetch`, `pull`, `push`, `commit`, `tag`, `pushtag` and `each` all do this; `add` and `restore` do it only
+`sync`, `status`, `fetch`, `pull`, `push`, `commit`, `tag`, `pushtag` and `each` all do this; `add` and `restore` do it only
 with `-p` / `-i`, when git asks hunk by hunk. `diff` and `log` stay one diff and one log of the whole tree.
 
 pit colors its output lightly, when it goes to a terminal: the headers, the branches and changes in `status`, questions, warnings and
@@ -380,7 +381,7 @@ pit each -g go -- tag v1.4.0
 ```
 
 The root repo belongs to no group; add `-r .` to include it. Externals of a group that aren't cloned yet are left out, except by
-`pit sync`, `pit list` and `pit status`, which deal with them.
+`pit sync`, `pit list`, `pit tree` and `pit status`, which deal with them.
 
 ## Keeping the externals out of the root repo
 

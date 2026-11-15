@@ -51,6 +51,7 @@ func Reset() { resetTerminal() }
 
 // SGR parameters of pit's colors
 const (
+	bold       = "1"
 	dim        = "2"
 	red        = "31"
 	green      = "32"
@@ -69,11 +70,14 @@ func paint(on bool, sgr, s string) string {
 	return "\033[" + sgr + "m" + s + "\033[0m"
 }
 
-// Red, Green, Yellow and Cyan color s for stdout. Pad before coloring: padding counts the escapes otherwise.
-func Cyan(s string) string   { return paint(colorOut, cyan, s) }
-func Red(s string) string    { return paint(colorOut, red, s) }
-func Green(s string) string  { return paint(colorOut, green, s) }
-func Yellow(s string) string { return paint(colorOut, yellow, s) }
+// Red, Green, Yellow, Cyan, BoldCyan (repo names, as in block headers), Bold and Dim color s for stdout.
+func Bold(s string) string     { return paint(colorOut, bold, s) }
+func Dim(s string) string      { return paint(colorOut, dim, s) }
+func Cyan(s string) string     { return paint(colorOut, cyan, s) }
+func BoldCyan(s string) string { return paint(colorOut, boldCyan, s) }
+func Red(s string) string      { return paint(colorOut, red, s) }
+func Green(s string) string    { return paint(colorOut, green, s) }
+func Yellow(s string) string   { return paint(colorOut, yellow, s) }
 
 // Note reports something worth knowing on stderr.
 func Note(format string, a ...any) {
@@ -146,10 +150,81 @@ func header(name, path string, color bool) string {
 // End closes a block with an empty line.
 func End() { fmt.Println() }
 
-// Pad right-pads s to width runes.
-func Pad(s string, width int) string {
-	if n := utf8.RuneCountInString(s); n < width {
-		return s + strings.Repeat(" ", width-n)
+// Table prints rows under a row of column titles, in a box with rules between the columns, as in
+//
+//	╭──────┬────────╮
+//	│ Name │ Branch │
+//	├──────┼────────┤
+//	│ a    │ main   │
+//	╰──────┴────────╯
+//
+// Cells may come colored already (their escapes don't count for the column widths); the box is dim, the titles bold. A row has a cell per
+// title.
+func Table(titles []string, rows [][]string) {
+	fmt.Print(table(titles, rows, colorOut))
+}
+
+func table(titles []string, rows [][]string, color bool) string {
+	widths := make([]int, len(titles))
+	for i, t := range titles {
+		widths[i] = Width(t)
+	}
+	for _, r := range rows {
+		for i, c := range r {
+			widths[i] = max(widths[i], Width(c))
+		}
+	}
+	var b strings.Builder
+	rule := func(left, mid, right string) {
+		cols := make([]string, len(widths))
+		for i, w := range widths {
+			cols[i] = strings.Repeat("─", w+2)
+		}
+		b.WriteString(paint(color, dim, left+strings.Join(cols, mid)+right) + "\n")
+	}
+	bar := paint(color, dim, "│")
+	line := func(cells []string) {
+		b.WriteString(bar)
+		for i, c := range cells {
+			b.WriteString(" " + c + strings.Repeat(" ", widths[i]-Width(c)) + " " + bar)
+		}
+		b.WriteString("\n")
+	}
+	head := make([]string, len(titles))
+	for i, t := range titles {
+		head[i] = paint(color, bold, t)
+	}
+	rule("╭", "┬", "╮")
+	line(head)
+	rule("├", "┼", "┤")
+	for _, r := range rows {
+		line(r)
+	}
+	rule("╰", "┴", "╯")
+	return b.String()
+}
+
+// Width is the number of runes s shows, not counting its color escapes.
+func Width(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "\033[") {
+			if end := strings.IndexByte(s[i:], 'm'); end >= 0 {
+				i += end + 1
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		n++
+	}
+	return n
+}
+
+// Pad right-pads s to w runes, not counting its color escapes.
+func Pad(s string, w int) string {
+	if n := Width(s); n < w {
+		return s + strings.Repeat(" ", w-n)
 	}
 	return s
 }

@@ -35,6 +35,7 @@ sync keeps the externals out of it via its .gitignore.
 Commands:
   sync                        Clone missing externals, update .gitignore
   list                        Show the externals
+  tree                        Show the externals in their directory tree
   status [--fetch]            Branch, ahead/behind and changes per repo
   diff [<git diff options>]   Diffs of all repos as one diff
   add <path>... | -A          Stage, each path in the repo that owns it
