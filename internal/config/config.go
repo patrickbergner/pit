@@ -174,13 +174,6 @@ func (c *Config) validate() error {
 		}
 		byKey[key] = e.Name
 	}
-	for _, a := range c.Externals {
-		for _, b := range c.Externals {
-			if a.Name != b.Name && strings.HasPrefix(strings.ToLower(b.Path), strings.ToLower(a.Path)+"/") {
-				return fmt.Errorf("external %q (%s) lies inside external %q (%s)", b.Name, b.Path, a.Name, a.Path)
-			}
-		}
-	}
 	groups := c.Groups()
 	for _, g := range slices.Sorted(maps.Keys(c.Settings.ConfirmPushGroups)) {
 		if g != RootKey && !slices.Contains(groups, g) {

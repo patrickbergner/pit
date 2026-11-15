@@ -35,7 +35,9 @@ Colors (default: on in a terminal, off if NO_COLOR is set):
 
 Setup:
   sync                      Clone missing externals, check the others, and
-                            keep them out of the root repo via .gitignore
+                            keep them out of the repos holding them (the
+                            root's .gitignore, an external's
+                            .git/info/exclude)
   list                      Show the externals and whether they are cloned
   tree                      Show the externals in the directory tree
 
@@ -223,8 +225,14 @@ func check(w *workspace.Workspace, uncloned bool) {
 		}
 		ui.Warn("not cloned yet: %s; run pit sync", strings.Join(names, ", "))
 	}
-	if w.RootRepo != nil && !w.IgnoreUpToDate() {
-		ui.Warn(".gitignore doesn't list the current externals; run pit sync")
+	for _, b := range w.IgnoreBlocks() {
+		switch {
+		case b.UpToDate():
+		case b.Repo.IsRoot():
+			ui.Warn(".gitignore doesn't list the current externals; run pit sync")
+		default:
+			ui.Warn("%s of %s doesn't list the current externals inside it; run pit sync", b.Name(), b.Repo.Name)
+		}
 	}
 }
 

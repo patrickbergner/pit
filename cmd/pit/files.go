@@ -65,9 +65,15 @@ func cmdAdd(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Without the ignore block, the root repo would stage the externals' clones as embedded repos.
-	if w.RootRepo != nil && !w.IgnoreUpToDate() && slices.ContainsFunc(targets, func(t workspace.Target) bool { return t.Repo.IsRoot() }) {
-		return errors.New("add: .gitignore doesn't list the current externals, so the root repo would pick up their clones; run pit sync first")
+	// Without its ignore block, a repo would stage the clones of the externals inside it as embedded repos.
+	for _, b := range w.IgnoreBlocks() {
+		if !b.UpToDate() && slices.ContainsFunc(targets, func(t workspace.Target) bool { return t.Repo == b.Repo }) {
+			if b.Repo.IsRoot() {
+				return errors.New("add: .gitignore doesn't list the current externals, so the root repo would pick up their clones; run pit sync first")
+			}
+			return fmt.Errorf("add: %s of %s doesn't list the current externals inside it, so the repo would pick up their clones; run pit sync first",
+				b.Name(), b.Repo.Name)
+		}
 	}
 	return sequence("add", targets, interactive(p.opts), func(t workspace.Target) []string {
 		return pathspecArgs(append([]string{"add"}, p.opts...), t)

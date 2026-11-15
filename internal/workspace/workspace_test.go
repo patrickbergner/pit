@@ -168,7 +168,8 @@ func TestIgnoreBlock(t *testing.T) {
 	root := fixture(t, true)
 	w, err := Open(root)
 	must(t, err)
-	entries := w.IgnoreEntries()
+	rb := w.IgnoreBlock(w.RootRepo)
+	entries := rb.Entries
 	if !slices.Equal(entries, []string{"/.pit/", "/a/", "/lib/b/", "/lib/c/"}) {
 		t.Errorf("entries = %v", entries)
 	}
@@ -201,12 +202,108 @@ func TestIgnoreBlock(t *testing.T) {
 		t.Error("new file")
 	}
 
-	if w.IgnoreUpToDate() {
-		t.Error("IgnoreUpToDate without a .gitignore")
+	// without entries, the block goes; at the end of the file, together with the empty line that set it apart
+	if got := UpdateIgnoreBlock(content, nil); got != "*.log\n\ntmp/\n" {
+		t.Errorf("removed in the middle:\n%q", got)
 	}
-	must(t, os.WriteFile(w.IgnoreFile(), []byte(UpdateIgnoreBlock("", entries)), 0o644))
-	if !w.IgnoreUpToDate() {
-		t.Error("IgnoreUpToDate after writing the block")
+	if got := UpdateIgnoreBlock(UpdateIgnoreBlock("*.log\r\n", []string{"/a/"}), nil); got != "*.log\r\n" {
+		t.Errorf("removed at the end:\n%q", got)
+	}
+	if got := UpdateIgnoreBlock("*.log\n", nil); got != "*.log\n" {
+		t.Errorf("nothing to remove:\n%q", got)
+	}
+
+	if rb.UpToDate() {
+		t.Error("UpToDate without a .gitignore")
+	}
+	must(t, os.WriteFile(rb.File, []byte(UpdateIgnoreBlock("", entries)), 0o644))
+	if !rb.UpToDate() {
+		t.Error("UpToDate after writing the block")
+	}
+	// the externals without externals inside them have empty blocks, which are up to date without a file
+	blocks := w.IgnoreBlocks()
+	if len(blocks) != 3 || blocks[0].Repo.Name != "a" || blocks[1].Repo.Name != "b" || blocks[2].Repo != w.RootRepo {
+		t.Fatalf("IgnoreBlocks = %v", blocks)
+	}
+	if len(blocks[0].Entries) != 0 || !blocks[0].UpToDate() || blocks[0].Name() != ".git/info/exclude" {
+		t.Errorf("a's block = %+v", blocks[0])
+	}
+}
+
+func TestNested(t *testing.T) {
+	root := t.TempDir()
+	// listed before the external it lies inside; d inside c inside p
+	cfg := `{"externals": {"c": {"url": "u", "path": "p/x/c"}, "p": {"url": "u", "path": "p"}, "d": {"url": "u", "path": "p/x/c/d"},
+		"e": {"url": "u", "path": "e"}}}`
+	must(t, os.WriteFile(filepath.Join(root, "pit-externals.json"), []byte(cfg), 0o644))
+	for _, d := range []string{".git", "p/.git", "p/x/c/.git"} {
+		must(t, os.MkdirAll(filepath.Join(root, filepath.FromSlash(d)), 0o755))
+	}
+	w, err := Open(root)
+	must(t, err)
+	byName := map[string]*Repo{}
+	for _, r := range w.Externals {
+		byName[r.Name] = r
+	}
+	p, c, d, e := byName["p"], byName["c"], byName["d"], byName["e"]
+	if c.Parent != p || d.Parent != c || p.Parent != nil || e.Parent != nil {
+		t.Errorf("parents: c %v, d %v, p %v, e %v", c.Parent, d.Parent, p.Parent, e.Parent)
+	}
+	if w.Container(c) != p || w.Container(p) != w.RootRepo {
+		t.Error("Container")
+	}
+	if got := names(w.Inside(w.RootRepo)); !slices.Equal(got, []string{"p", "e"}) {
+		t.Errorf("Inside(root) = %v", got)
+	}
+	if got := names(w.Inside(p)); !slices.Equal(got, []string{"c"}) {
+		t.Errorf("Inside(p) = %v", got)
+	}
+	if c.PathIn(p) != "x/c" || p.PathIn(w.RootRepo) != "p" {
+		t.Error("PathIn")
+	}
+
+	// each repo's block lists the externals directly inside it
+	for _, tc := range []struct {
+		repo    *Repo
+		file    string
+		entries []string
+	}{
+		{w.RootRepo, filepath.Join(root, ".gitignore"), []string{"/.pit/", "/p/", "/e/"}},
+		{p, filepath.Join(root, "p", ".git", "info", "exclude"), []string{"/x/c/"}},
+		{c, filepath.Join(root, "p", "x", "c", ".git", "info", "exclude"), []string{"/d/"}},
+	} {
+		b := w.IgnoreBlock(tc.repo)
+		if b.File != tc.file || !slices.Equal(b.Entries, tc.entries) {
+			t.Errorf("block of %s = %s %v", tc.repo.Name, b.File, b.Entries)
+		}
+	}
+
+	// a path goes to the innermost external holding it; a directory covers the externals inside, too
+	w.Cwd = root
+	targets, err := w.Route([]string{"p/x/c/f", "p/x/g", "p/x"})
+	must(t, err)
+	var got []string
+	for _, tg := range targets {
+		got = append(got, tg.Repo.Name+":"+strings.Join(tg.Pathspecs, ","))
+	}
+	if !slices.Equal(got, []string{"c:f,.", "p:x/g,x"}) {
+		t.Errorf("Route = %v", got)
+	}
+}
+
+func TestCommonDir(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "main")
+	must(t, os.MkdirAll(filepath.Join(main, ".git", "worktrees", "wt"), 0o755))
+	must(t, os.WriteFile(filepath.Join(main, ".git", "worktrees", "wt", "commondir"), []byte("../..\n"), 0o644))
+	wt := filepath.Join(root, "wt")
+	must(t, os.MkdirAll(wt, 0o755))
+	must(t, os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+filepath.ToSlash(filepath.Join(main, ".git", "worktrees", "wt"))+"\n"), 0o644))
+	if got := (&Repo{Dir: wt}).CommonDir(); got != filepath.Join(main, ".git") {
+		t.Errorf("CommonDir of a worktree = %s", got)
+	}
+	if got := (&Repo{Dir: main}).CommonDir(); got != filepath.Join(main, ".git") {
+		t.Errorf("CommonDir = %s", got)
 	}
 }
 

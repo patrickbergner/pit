@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -13,8 +14,9 @@ import (
 	"github.com/patrickbergner/pit/internal/workspace"
 )
 
-// cmdSync clones missing externals, checks the cloned ones and updates the ignore block. It never changes or deletes an existing directory.
-// Each repo with something to report gets a block; the externals cloned before, as configured, are summed up.
+// cmdSync clones missing externals, checks the cloned ones and updates the ignore blocks that keep the externals out of the repos holding
+// them. It never changes or deletes an existing directory. Each repo with something to report gets a block; the externals cloned before,
+// as configured, are summed up.
 func cmdSync(w *workspace.Workspace, args []string) error {
 	p, err := parseArgs("sync", args, spec{noPaths: true})
 	if err != nil {
@@ -33,46 +35,50 @@ func cmdSync(w *workspace.Workspace, args []string) error {
 			}
 		}
 	}
+	// an external's parent first, as the external is cloned into the parent's work tree
+	exts = slices.Clone(exts)
+	slices.SortStableFunc(exts, func(a, b *workspace.Repo) int { return depth(a) - depth(b) })
 
 	var failed []string
 	shown, quiet := 0, 0
+	// The ignore blocks of the externals not selected come first, as the selected ones may lie inside them.
+	for _, b := range w.IgnoreBlocks() {
+		if !b.Repo.IsRoot() && !slices.Contains(exts, b.Repo) && syncBlock(w, b, false, &failed) {
+			ui.End()
+			shown++
+		}
+	}
 	for _, r := range exts {
 		if err := stopped(); err != nil {
 			return err
 		}
+		open := false
+		if !r.Cloned() {
+			header(r)
+			open = true
+			if err := clone(w, r); err != nil {
+				ui.Error("%s", err)
+				failed = append(failed, r.Label())
+			}
+		} else if problem := originProblem(r); problem != "" {
+			header(r)
+			open = true
+			ui.Warn("%s", problem)
+		}
+		// right away, before the externals inside it are cloned
 		if r.Cloned() {
-			if problem := originProblem(r); problem != "" {
-				header(r)
-				ui.Warn("%s", problem)
-				ui.End()
-				shown++
-			} else {
-				quiet++
-			}
-			continue
+			open = syncBlock(w, w.IgnoreBlock(r), open, &failed)
 		}
-		header(r)
-		if err := clone(w, r); err != nil {
-			ui.Error("%s", err)
-			failed = append(failed, r.Label())
-		}
-		ui.End()
-		shown++
-	}
-	if w.RootRepo != nil {
-		notes, err := syncIgnore(w)
-		if len(notes) > 0 || err != nil {
-			header(w.RootRepo)
-			for _, n := range notes {
-				ui.Note("%s", n)
-			}
-			if err != nil {
-				ui.Error(".gitignore: %s", err)
-				failed = append(failed, w.RootRepo.Label())
-			}
+		if open {
 			ui.End()
 			shown++
+		} else {
+			quiet++
 		}
+	}
+	if w.RootRepo != nil && syncBlock(w, w.IgnoreBlock(w.RootRepo), false, &failed) {
+		ui.End()
+		shown++
 	}
 	switch {
 	case quiet > 0 && shown == 0:
@@ -84,6 +90,15 @@ func cmdSync(w *workspace.Workspace, args []string) error {
 		return fmt.Errorf("sync failed in %s", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// depth is the number of externals the external r lies inside.
+func depth(r *workspace.Repo) int {
+	d := 0
+	for p := r.Parent; p != nil; p = p.Parent {
+		d++
+	}
+	return d
 }
 
 // originProblem tells what is wrong with the origin of a cloned external, if anything.
@@ -98,23 +113,31 @@ func originProblem(r *workspace.Repo) string {
 	return ""
 }
 
-// clone clones an external that isn't cloned yet, unless something else is in its way.
+// clone clones an external that isn't cloned yet, unless something else is in its way: the external it lies inside isn't cloned, the repo
+// holding its directory tracks files in it, or the directory has other content.
 func clone(w *workspace.Workspace, r *workspace.Repo) error {
+	if r.Parent != nil && !r.Parent.Cloned() {
+		return fmt.Errorf("%s lies inside %s, which isn't cloned yet", r.Path, r.Parent.Name)
+	}
+	if c := w.Container(r); c != nil {
+		rel := r.PathIn(c)
+		tracked, err := git.Output(c.Dir, "ls-files", "--", rel)
+		if err != nil {
+			return err
+		}
+		switch {
+		case tracked != "" && c.IsRoot():
+			return fmt.Errorf("the root repo tracks files in %s; untrack them first (git rm -r --cached %s, then commit)", rel, rel)
+		case tracked != "":
+			return fmt.Errorf("%s tracks files in %s; an external can only go where the repo holding it has no files", c.Name, rel)
+		}
+	}
 	entries, err := os.ReadDir(r.Dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	if len(entries) > 0 {
 		return fmt.Errorf("%s exists and is not empty, but is not a git repo; pit doesn't touch it", r.Path)
-	}
-	if w.RootRepo != nil {
-		tracked, err := git.Output(w.Root, "ls-files", "--", r.Path)
-		if err != nil {
-			return err
-		}
-		if tracked != "" {
-			return fmt.Errorf("the root repo tracks files in %s; untrack them first (git rm -r --cached %s, then commit)", r.Path, r.Path)
-		}
 	}
 
 	refs, err := git.Output("", "ls-remote", "--heads", r.Ext.URL)
@@ -139,28 +162,60 @@ func gitDo(dir string, args ...string) error {
 	return err
 }
 
-// syncIgnore writes the managed block of the root's .gitignore. The notes tell what changed, and which externals were dropped from the
-// config.
-func syncIgnore(w *workspace.Workspace) (notes []string, err error) {
-	content, err := w.ReadIgnore()
+// syncBlock updates an ignore block and tells about it in its repo's output block, starting that unless it is open already. It returns
+// whether the repo's block is open now. A failure is added to failed.
+func syncBlock(w *workspace.Workspace, b workspace.IgnoreBlock, open bool, failed *[]string) bool {
+	notes, err := syncIgnore(w, b)
+	if len(notes) == 0 && err == nil {
+		return open
+	}
+	if !open {
+		header(b.Repo)
+	}
+	for _, n := range notes {
+		ui.Note("%s", n)
+	}
+	if err != nil {
+		ui.Error("%s: %s", b.Name(), err)
+		*failed = append(*failed, b.Repo.Label())
+	}
+	return true
+}
+
+// syncIgnore writes an ignore block. The notes tell what changed, and which externals were dropped from the config.
+func syncIgnore(w *workspace.Workspace, b workspace.IgnoreBlock) (notes []string, err error) {
+	content, err := b.Read()
 	if err != nil {
 		return nil, err
 	}
 	old, _ := workspace.ParseIgnoreBlock(content)
-	entries := w.IgnoreEntries()
 	for _, e := range old {
-		if !slices.Contains(entries, e) {
-			notes = append(notes, strings.Trim(e, "/")+" is no longer an external and no longer ignored; its directory was left as it is")
+		path := b.Repo.RootRelative() + strings.Trim(e, "/")
+		if !slices.Contains(b.Entries, e) && !slices.ContainsFunc(w.Externals, func(r *workspace.Repo) bool { return strings.EqualFold(r.Path, path) }) {
+			notes = append(notes, path+" is no longer an external and no longer ignored; its directory was left as it is")
 		}
 	}
-	updated := workspace.UpdateIgnoreBlock(content, entries)
+	updated := workspace.UpdateIgnoreBlock(content, b.Entries)
 	if updated == content {
 		return notes, nil
 	}
-	if err := os.WriteFile(w.IgnoreFile(), []byte(updated), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(b.File), 0o755); err != nil {
 		return notes, err
 	}
-	return append(notes, "updated .gitignore; commit it together with pit-externals.json"), nil
+	if err := os.WriteFile(b.File, []byte(updated), 0o644); err != nil {
+		return notes, err
+	}
+	switch {
+	case b.Repo.IsRoot():
+		return append(notes, "updated .gitignore; commit it together with pit-externals.json"), nil
+	case len(b.Entries) == 0:
+		return append(notes, "removed pit's block from "+b.Name()), nil
+	}
+	var inside []string
+	for _, r := range w.Inside(b.Repo) {
+		inside = append(inside, r.PathIn(b.Repo))
+	}
+	return append(notes, fmt.Sprintf("updated %s, which keeps %s out of this repo", b.Name(), strings.Join(inside, ", "))), nil
 }
 
 // normalizeURL makes the spellings of one repo URL comparable: scheme, user, scp-like syntax, trailing slash and .git, case.

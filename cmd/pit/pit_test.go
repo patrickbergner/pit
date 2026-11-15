@@ -24,8 +24,6 @@ func TestNoRootAndBadConfig(t *testing.T) {
 	contains(t, s.pitFails(s.dir, "list"), "unknown field")
 	s.write(s.dir, "pit-externals.json", `{"externals": {"x": {"url": "u", "path": "../x"}}}`)
 	contains(t, s.pitFails(s.dir, "list"), `path "../x"`)
-	s.write(s.dir, "pit-externals.json", `{"externals": {"x": {"url": "u", "path": "x"}, "y": {"url": "u", "path": "x/y"}}}`)
-	contains(t, s.pitFails(s.dir, "list"), "lies inside external")
 }
 
 func TestSyncClonesAndIgnores(t *testing.T) {
@@ -799,5 +797,82 @@ func TestTagAndPushTag(t *testing.T) {
 	contains(t, s.pitFails(root, "pushtag", "-y", "-r", "b", "v0.1.0"), "b: origin already has a tag v0.1.0", "nothing was tagged")
 	if s.git(s.path("forge/nested/b"), "tag") != "" {
 		t.Error("b was tagged although origin has the tag")
+	}
+}
+
+func TestNestedExternals(t *testing.T) {
+	s := newSandbox(t)
+	// app has plugins/core and plugins/extra of its own, and myplugin goes to plugins/myplugin
+	app := s.remote("app", false)
+	seed := s.path("seed/app")
+	s.write(seed, "plugins/core/core.txt", "core\n")
+	s.write(seed, "plugins/extra/extra.txt", "extra\n")
+	s.commitAll(seed, "plugins")
+	s.git(seed, "push", "-q", "origin", "main")
+	plugin := ext{"myplugin", s.remote("myplugin", false), "app/plugins/myplugin"}
+	root := s.root(true, plugin, ext{"app", app, "app"}) // myplugin listed first
+
+	// myplugin can't be cloned before app
+	contains(t, s.pitFails(root, "sync", "-r", "myplugin"), "app/plugins/myplugin lies inside app, which isn't cloned yet")
+	if s.exists(root, "app") {
+		t.Error("sync -r myplugin created app/")
+	}
+
+	// app first, and keeping myplugin out of it before myplugin is cloned
+	out := s.pit(root, "sync")
+	contains(t, out, block("app", "Cloning into 'app'...\n"),
+		"pit: updated .git/info/exclude, which keeps plugins/myplugin out of this repo\n\n"+
+			block("myplugin (app/plugins/myplugin)", "Cloning into 'app/plugins/myplugin'...\n"))
+	contains(t, s.read(root, "app/.git/info/exclude"), "\n# >>> pit externals - managed by pit, do not edit\n/plugins/myplugin/\n# <<< pit externals\n")
+	contains(t, s.read(root, ".gitignore"), "\n/.pit/\n/app/\n# <<< pit externals") // myplugin is app's business
+	appDir := s.path("forge/app")
+	if st := s.git(appDir, "status", "--porcelain", "--ignored"); st != "!! plugins/myplugin/" {
+		t.Errorf("app status = %q", st)
+	}
+	contains(t, s.pit(root, "sync"), "all 2 externals already cloned")
+	contains(t, s.pit(root, "tree"), root+" (pit root)\n"+
+		"└── app               main  cloned\n"+
+		"    └── plugins\n"+
+		"        ├── core\n"+
+		"        ├── extra\n"+
+		"        └── myplugin  main  cloned\n")
+
+	// every file belongs to the innermost repo holding it
+	s.write(root, "app/plugins/core/core.txt", "core2\n")
+	s.write(root, "app/plugins/new.txt", "new\n")
+	s.write(root, "app/plugins/myplugin/README.md", "myplugin2\n")
+	out = s.pit(root, "status")
+	contains(t, out, "   M app/plugins/myplugin/README.md\n", "   M app/plugins/core/core.txt\n", "  ?? app/plugins/new.txt\n")
+	lacks(t, out, "?? app/plugins/myplugin")
+	out = s.pit(root, "status", "app/plugins/myplugin")
+	contains(t, out, "app/plugins/myplugin/README.md")
+	lacks(t, out, "core.txt")
+	s.pit(root, "add", "-A")
+	s.pit(root, "commit", "-m", "Update the plugins")
+	if got := s.git(appDir, "show", "--name-only", "--format=", "HEAD"); got != "plugins/core/core.txt\nplugins/new.txt" {
+		t.Errorf("app's commit has %q", got)
+	}
+	if got := s.git(s.path("forge/app/plugins/myplugin"), "show", "--name-only", "--format=", "HEAD"); got != "README.md" {
+		t.Errorf("myplugin's commit has %q", got)
+	}
+
+	// dropped from the config: app's block goes, and myplugin's clone stays
+	s.config(root, ext{"app", app, "app"})
+	out = s.pit(root, "status")
+	contains(t, out, "pit: warning: .git/info/exclude of app doesn't list the current externals inside it; run pit sync")
+	contains(t, s.pitFails(root, "add", "-A"), "run pit sync first")
+	out = s.pit(root, "sync")
+	contains(t, out, block("app", "pit: app/plugins/myplugin is no longer an external and no longer ignored; its directory was left as it is\n"+
+		"pit: removed pit's block from .git/info/exclude\n"))
+	lacks(t, s.read(root, "app/.git/info/exclude"), "pit externals")
+	if !s.exists(root, "app/plugins/myplugin/README.md") {
+		t.Error("sync deleted a dropped external's clone")
+	}
+
+	// an external can't go where the repo holding it has files
+	s.config(root, ext{"app", app, "app"}, ext{"other", s.remote("other", false), "app/plugins/core"})
+	contains(t, s.pitFails(root, "sync"), block("other (app/plugins/core)", "pit: app tracks files in plugins/core; an external can only go where"))
+	if s.read(root, "app/plugins/core/core.txt") != "core2\n" {
+		t.Error("sync touched app/plugins/core")
 	}
 }

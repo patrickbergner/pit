@@ -30,7 +30,9 @@ Quick start:
 
 If the directory holding pit-externals.json is a git repo itself, it is
 included as the root repo, "(pit root)" in output and "." with -r, and pit
-sync keeps the externals out of it via its .gitignore.
+sync keeps the externals out of it via its .gitignore. An external can
+also lie inside another one; pit sync then keeps it out of that one via
+the other's .git/info/exclude, which leaves the other's history alone.
 
 Commands:
   sync                        Clone missing externals, update .gitignore

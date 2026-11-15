@@ -35,6 +35,8 @@ type Repo struct {
 	Path string           // relative to the root with forward slashes; "" for the root repo
 	Dir  string           // absolute directory
 	Ext  *config.External // nil for the root repo
+	// Parent is the external whose directory holds this external's, the innermost one if several do; nil if no other external does.
+	Parent *Repo
 }
 
 func (r *Repo) IsRoot() bool { return r.Ext == nil }
@@ -65,6 +67,21 @@ func (r *Repo) GitDir() string {
 		dir = filepath.Join(r.Dir, dir)
 	}
 	return dir
+}
+
+// CommonDir returns the repo's common git directory: GitDir, or for a linked worktree, the git directory of the main one. That's where the
+// files are that all worktrees share, such as info/exclude.
+func (r *Repo) CommonDir() string {
+	gitDir := r.GitDir()
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	dir := filepath.FromSlash(strings.TrimSpace(string(data)))
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(gitDir, dir)
+	}
+	return filepath.Clean(dir)
 }
 
 func isRepo(dir string) bool {
@@ -110,10 +127,46 @@ func Open(cwd string) (*Workspace, error) {
 		e := &cfg.Externals[i]
 		w.Externals = append(w.Externals, &Repo{Name: e.Name, Path: e.Path, Dir: filepath.Join(root, filepath.FromSlash(e.Path)), Ext: e})
 	}
+	for _, r := range w.Externals {
+		for _, o := range w.Externals {
+			if hasPathPrefix(r.Path, o.Path) && (r.Parent == nil || len(o.Path) > len(r.Parent.Path)) {
+				r.Parent = o
+			}
+		}
+	}
 	if isRepo(root) {
 		w.RootRepo = &Repo{Name: RootName, Dir: root}
 	}
 	return w, nil
+}
+
+// Container returns the repo whose work tree holds the external r's directory: its parent external, otherwise the root repo (nil if the
+// root isn't a git repo).
+func (w *Workspace) Container(r *Repo) *Repo {
+	if r.Parent != nil {
+		return r.Parent
+	}
+	return w.RootRepo
+}
+
+// Inside returns the externals whose directories lie directly in the work tree of repo c, the root repo or an external, in config order.
+// Externals inside those are not included.
+func (w *Workspace) Inside(c *Repo) []*Repo {
+	var repos []*Repo
+	for _, r := range w.Externals {
+		if r.Parent == c || c.IsRoot() && r.Parent == nil {
+			repos = append(repos, r)
+		}
+	}
+	return repos
+}
+
+// PathIn returns the external r's path relative to the repo c holding it (see Container).
+func (r *Repo) PathIn(c *Repo) string {
+	if c.IsRoot() {
+		return r.Path
+	}
+	return r.Path[len(c.Path)+1:]
 }
 
 // All returns every repo: the externals in config order, then the root repo.
@@ -224,7 +277,7 @@ type Target struct {
 }
 
 // Route maps paths given on the command line (relative to the current directory) to the repos owning them. A path belongs to the external
-// whose path is its longest prefix, otherwise to the root repo. A directory also covers every external below it, so "pit add ." at the root
+// whose path is its longest prefix, the innermost one if externals are nested, otherwise to the root repo. A directory also covers every external below it, so "pit add ." at the root
 // stages in all repos.
 func (w *Workspace) Route(paths []string) ([]Target, error) {
 	specs := map[*Repo][]string{}

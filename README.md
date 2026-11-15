@@ -6,8 +6,8 @@ You list the repositories in a `pit-externals.json` at the top of the tree. pit 
 clone, and from then on runs the everyday git operations across all of them at once: one `pit status` for the whole tree, one
 `pit commit` that commits in every repo with changes using the same message, one `pit push`.
 
-Each external stays an ordinary clone. `cd` into one and use git directly whenever you like; pit doesn't mind. pit adds no remotes, hooks,
-refs or files to any repo and never rewrites history. It only runs commands you could have typed yourself in each repo.
+Each external stays an ordinary clone. `cd` into one and use git directly whenever you like; pit doesn't mind. pit adds no remotes, hooks
+or refs to any repo, touches no files in it except to keep the externals' clones out of it, and never rewrites history. It only runs commands you could have typed yourself in each repo.
 
 `pit` is a single native binary with no dependencies besides git.
 
@@ -78,8 +78,8 @@ forge/                     <- the root; here a git repo itself
 ```
 
 pit works on all **externals** in config order, plus the **root repo** if the root is a git repo. The root repo is selected as `.` (`-r .`),
-shows up as `(pit root)` in output, and always comes last. Every file belongs to the external whose path contains it, otherwise to the
-root repo (or to no repo, if the root is not a git repo).
+shows up as `(pit root)` in output, and always comes last. Every file belongs to the external whose path contains it (the innermost one,
+if [externals are nested](#nested-externals)), otherwise to the root repo (or to no repo, if the root is not a git repo).
 
 ## Commands
 
@@ -100,7 +100,7 @@ Paths in output are relative to the current directory, like git prints them. Opt
 
 | Command | What it does |
 |---|---|
-| `pit sync` | Clone missing externals, check existing ones, update the root's `.gitignore` |
+| `pit sync` | Clone missing externals, check existing ones, keep them out of the repos holding them (`.gitignore`, `.git/info/exclude`) |
 | `pit list` | A table of the externals with path, branch, groups, whether they are cloned and URL; the root directory |
 | `pit tree` | The directories from the root down to the externals and their siblings, with branch, groups and whether the externals are cloned |
 | `pit status [--fetch]` | Branch, ahead/behind and changed files per repo |
@@ -154,20 +154,22 @@ or `--no-color`, before or after the command, decides it either way; that goes f
 For each external:
 
 - **Directory missing or empty:** clones it, checking out the configured branch. An empty remote repo is cloned too, with that branch
-  started.
+  started. An external inside another one is cloned after that one, whatever the order in the config.
 - **Already a git repo:** checks that its `origin` is the configured URL (`https://`, `ssh://` and `git@host:path` spellings and a
   trailing `.git` don't matter) and warns if not. Nothing is changed.
 - **Exists, but isn't empty and isn't a repo:** an error for this external. pit never overwrites or adopts content.
 
-Then it updates the root repo's `.gitignore` (see [below](#keeping-the-externals-out-of-the-root-repo)). An external removed from the config
-is reported, and its directory is left as it is. Externals that were cloned already, with the configured origin, are summed up in one
+Along the way it keeps the externals out of the repos holding them: the root repo's `.gitignore` (see
+[below](#keeping-the-externals-out-of-the-root-repo)), and the `.git/info/exclude` of an external with others inside (see
+[Nested externals](#nested-externals)). An external removed from the config is reported, and its directory is left as it is. Externals that were cloned already, with the configured origin, are summed up in one
 line.
 
 To add or remove an external, edit `pit-externals.json` and run `pit sync`. If the root is a git repo, commit the config together with
 `.gitignore`.
 
-All other commands warn when an external isn't cloned yet or the `.gitignore` is out of date. `pit add` refuses to stage in the root repo
-until `pit sync` has fixed the `.gitignore`, since the root repo would otherwise pick up the externals' clones.
+All other commands warn when an external isn't cloned yet or the `.gitignore` or an external's `.git/info/exclude` is out of date.
+`pit add` refuses to stage in such a repo until `pit sync` has fixed it, since the repo would otherwise pick up the clones of the externals
+inside it.
 
 ### `pit status`
 
@@ -364,7 +366,7 @@ Runs the git command in each repo, its output in a block per repo, and fails if 
 | `groups` | Names of the groups the external belongs to, for `-g` (optional) |
 
 The externals keep the order they have in the file. Unknown keys are rejected, so a typo fails loudly instead of being ignored. Paths must
-stay inside the root, must be unique, and an external can't lie inside another one. The whole `settings` object is optional.
+stay inside the root and must be unique. An external can lie inside another one; see [Nested externals](#nested-externals). The whole `settings` object is optional.
 
 ### Groups
 
@@ -400,6 +402,63 @@ If the root is a git repo, `pit sync` maintains a block in its `.gitignore`:
 - It's `.gitignore` rather than `.git/info/exclude` because it is versioned and works in every clone of the root repo.
 - An ignore rule doesn't affect files that are already tracked. If the root repo tracks files in an external's path, `pit sync` refuses to
   clone that external and tells you how to untrack them.
+- Externals inside other externals aren't listed here; the external holding them keeps them out (see below).
+
+## Nested externals
+
+An external can lie inside another one, for instance to add a repo of its own to a directory of a repo you use:
+
+```
+forge/
+  pit-externals.json
+  app/                     <- external "app"
+    plugins/
+      core/                <- belongs to app
+      extra/               <- belongs to app
+      myplugin/            <- external "myplugin", inside app
+```
+
+```json
+{
+  "externals": {
+    "app":      { "url": "git@github.com:you/app.git",      "path": "app" },
+    "myplugin": { "url": "git@github.com:you/myplugin.git", "path": "app/plugins/myplugin" }
+  }
+}
+```
+
+Every file belongs to the innermost external holding it: `app/plugins/core/x.txt` and new files in `app/plugins/` belong to `app`,
+everything in `app/plugins/myplugin/` to `myplugin`. `pit add app/plugins` stages in both; `pit commit` commits in both, as with any other
+externals. Nesting can go deeper, too.
+
+To keep `myplugin`'s clone out of `app`, `pit sync` maintains a block in the `.git/info/exclude` of `app`, which git reads like a
+`.gitignore`:
+
+```
+# >>> pit externals - managed by pit, do not edit
+/plugins/myplugin/
+# <<< pit externals
+```
+
+- It lists the externals directly inside `app`, anchored to its top directory, so `plugins/core` and `plugins/extra` stay part of it.
+  Externals further inside are kept out by the external holding them, in its own `.git/info/exclude`.
+- `.git/info/exclude` belongs to the clone and isn't versioned. Nothing in the history of `app` changes, and other clones of it, yours
+  elsewhere or other people's, are unaffected. That is also why `app` doesn't carry the entry in its `.gitignore`: `myplugin` is your
+  addition, not part of `app`.
+- Without it, `git status` in `app` would list `plugins/myplugin/` as untracked, and `git add -A` would stage the clone as an embedded
+  repository. With it, git, as well as pit, leaves `plugins/myplugin/` alone in `app`, whether you run it from the pit root or in `app`
+  itself.
+- `pit sync` clones `app` first and writes the block before it clones `myplugin`. `pit sync -r myplugin` refuses while `app` isn't
+  cloned.
+- `myplugin` can only go where `app` has no files: if `app` tracks files in `plugins/myplugin`, `pit sync` refuses to clone `myplugin`.
+- When `myplugin` is removed from the config, `pit sync` removes its entry, or the whole block, and leaves the clone as it is. `app` then
+  sees it as untracked again.
+- Only the block is rewritten, as in `.gitignore`. With a linked worktree as the external, it's the main worktree's `.git/info/exclude`,
+  which all its worktrees share.
+
+**Make sure `app` never gets files in `plugins/myplugin`**, on any branch, e.g. from someone who doesn't know about `myplugin`. To git,
+ignored files are expendable: switching `app` to a branch that has files there overwrites `myplugin`'s files with them, and switching back
+deletes them from `myplugin`'s work tree. Ignore rules only decide what git picks up, not what it may write.
 
 ## Local state
 

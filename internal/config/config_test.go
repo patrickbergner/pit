@@ -104,7 +104,6 @@ func TestParseRejects(t *testing.T) {
 		{`{"externals": {"x": {"url": "u", "path": "a/.git/x"}}}`, ".git"},
 		{`{"externals": {"x": {"url": "u", "path": ".pit/x"}}}`, ".pit"},
 		{`{"externals": {"x": {"url": "u", "path": "Lib"}, "y": {"url": "u", "path": "lib"}}}`, "same path"},
-		{`{"externals": {"x": {"url": "u", "path": "lib"}, "y": {"url": "u", "path": "lib/sub"}}}`, "lies inside"},
 	} {
 		_, err := Parse([]byte(tc.json))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -134,6 +133,13 @@ func TestGroups(t *testing.T) {
 		if _, err := Parse([]byte(tc.json)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("Parse(%s) = %v, want an error containing %q", tc.json, err, tc.want)
 		}
+	}
+}
+
+func TestParseAllowsNesting(t *testing.T) {
+	// an external may lie inside another one, listed before or after it
+	if _, err := Parse([]byte(`{"externals": {"y": {"url": "u", "path": "lib/sub/y"}, "x": {"url": "u", "path": "lib"}}}`)); err != nil {
+		t.Error(err)
 	}
 }
 

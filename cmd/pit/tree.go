@@ -13,7 +13,8 @@ import (
 	"github.com/patrickbergner/pit/internal/workspace"
 )
 
-// treeNode is a directory in the tree that tree shows: an external, a directory on the way to one, or a sibling of those.
+// treeNode is a directory in the tree that tree shows: an external, a directory on the way to one (which may be an external, too, if others
+// lie inside it), or a sibling of those.
 type treeNode struct {
 	name    string
 	repo    *workspace.Repo // the external in this directory
@@ -37,7 +38,7 @@ func (n *treeNode) child(name string) *treeNode {
 var foldCase = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 
 // addSiblings adds the subdirectories of dir, n's directory, that n doesn't have yet as siblings, and does the same in the children on the
-// way to an external. .git and pit's .pit are left out; so are directories that don't exist yet, as those of externals not cloned.
+// way to an external, including externals with externals inside. .git and pit's .pit are left out; so are directories that don't exist yet, as those of externals not cloned.
 func (n *treeNode) addSiblings(dir string) {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
@@ -49,7 +50,7 @@ func (n *treeNode) addSiblings(dir string) {
 		}
 	}
 	for _, k := range n.kids {
-		if k.repo == nil && !k.sibling {
+		if !k.sibling && (k.repo == nil || len(k.kids) > 0) {
 			k.addSiblings(filepath.Join(dir, k.name))
 		}
 	}
@@ -78,7 +79,7 @@ func cmdTree(w *workspace.Workspace, args []string) error {
 		for _, dir := range strings.Split(r.Path, "/") {
 			n = n.child(dir)
 		}
-		n.repo = r // externals don't nest, so this is a leaf
+		n.repo = r
 		exts = append(exts, r)
 		branchW = max(branchW, ui.Width(r.Ext.Branch))
 		groupsW = max(groupsW, ui.Width(strings.Join(r.Ext.Groups, ", ")))
