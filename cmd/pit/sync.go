@@ -14,6 +14,7 @@ import (
 )
 
 // cmdSync clones missing externals, checks the cloned ones and updates the ignore block. It never changes or deletes an existing directory.
+// Each repo with something to report gets a block; the externals cloned before, as configured, are summed up.
 func cmdSync(w *workspace.Workspace, args []string) error {
 	p, err := parseArgs("sync", args, spec{noPaths: true})
 	if err != nil {
@@ -33,39 +34,72 @@ func cmdSync(w *workspace.Workspace, args []string) error {
 		}
 	}
 
-	failed := 0
+	var failed []string
+	shown, quiet := 0, 0
 	for _, r := range exts {
 		if err := stopped(); err != nil {
 			return err
 		}
-		if err := syncExternal(w, r); err != nil {
-			fmt.Fprintf(os.Stderr, "pit: %s: %s\n", r.Name, err)
-			failed++
+		if r.Cloned() {
+			if problem := originProblem(r); problem != "" {
+				header(r)
+				ui.Warn("%s", problem)
+				ui.End()
+				shown++
+			} else {
+				quiet++
+			}
+			continue
 		}
+		header(r)
+		if err := clone(w, r); err != nil {
+			ui.Error("%s", err)
+			failed = append(failed, r.Label())
+		}
+		ui.End()
+		shown++
 	}
 	if w.RootRepo != nil {
-		if err := syncIgnore(w); err != nil {
-			fmt.Fprintf(os.Stderr, "pit: .gitignore: %s\n", err)
-			failed++
+		notes, err := syncIgnore(w)
+		if len(notes) > 0 || err != nil {
+			header(w.RootRepo)
+			for _, n := range notes {
+				ui.Note("%s", n)
+			}
+			if err != nil {
+				ui.Error(".gitignore: %s", err)
+				failed = append(failed, w.RootRepo.Label())
+			}
+			ui.End()
+			shown++
 		}
 	}
-	if failed > 0 {
-		return fmt.Errorf("sync: %s failed", ui.Plural(failed, "step"))
+	switch {
+	case quiet > 0 && shown == 0:
+		fmt.Printf("%s already cloned\n", all(quiet, "external"))
+	case quiet > 0:
+		fmt.Printf("%s already cloned\n", ui.Plural(quiet, "more external"))
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("sync failed in %s", strings.Join(failed, ", "))
 	}
 	return nil
 }
 
-func syncExternal(w *workspace.Workspace, r *workspace.Repo) error {
-	if r.Cloned() {
-		url, err := git.Output(r.Dir, "remote", "get-url", "origin")
-		switch {
-		case err != nil:
-			ui.Warn("%s: has no remote 'origin'; expected %s", r.Name, r.Ext.URL)
-		case normalizeURL(url) != normalizeURL(r.Ext.URL):
-			ui.Warn("%s: origin is %s, but %s is configured; pit leaves it as it is", r.Name, url, r.Ext.URL)
-		}
-		return nil
+// originProblem tells what is wrong with the origin of a cloned external, if anything.
+func originProblem(r *workspace.Repo) string {
+	url, err := git.Output(r.Dir, "remote", "get-url", "origin")
+	switch {
+	case err != nil:
+		return "no remote 'origin'; expected " + r.Ext.URL
+	case normalizeURL(url) != normalizeURL(r.Ext.URL):
+		return fmt.Sprintf("origin is %s, but %s is configured; pit leaves it as it is", url, r.Ext.URL)
 	}
+	return ""
+}
+
+// clone clones an external that isn't cloned yet, unless something else is in its way.
+func clone(w *workspace.Workspace, r *workspace.Repo) error {
 	entries, err := os.ReadDir(r.Dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -83,7 +117,6 @@ func syncExternal(w *workspace.Workspace, r *workspace.Repo) error {
 		}
 	}
 
-	ui.Note("cloning %s into %s", r.Name, r.Path)
 	refs, err := git.Output("", "ls-remote", "--heads", r.Ext.URL)
 	if err != nil {
 		return err
@@ -106,28 +139,28 @@ func gitDo(dir string, args ...string) error {
 	return err
 }
 
-// syncIgnore writes the managed block of the root's .gitignore and reports externals that were dropped from the config.
-func syncIgnore(w *workspace.Workspace) error {
+// syncIgnore writes the managed block of the root's .gitignore. The notes tell what changed, and which externals were dropped from the
+// config.
+func syncIgnore(w *workspace.Workspace) (notes []string, err error) {
 	content, err := w.ReadIgnore()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	old, _ := workspace.ParseIgnoreBlock(content)
 	entries := w.IgnoreEntries()
 	for _, e := range old {
 		if !slices.Contains(entries, e) {
-			ui.Note("%s is no longer an external and no longer ignored; its directory was left as it is", strings.Trim(e, "/"))
+			notes = append(notes, strings.Trim(e, "/")+" is no longer an external and no longer ignored; its directory was left as it is")
 		}
 	}
 	updated := workspace.UpdateIgnoreBlock(content, entries)
 	if updated == content {
-		return nil
+		return notes, nil
 	}
 	if err := os.WriteFile(w.IgnoreFile(), []byte(updated), 0o644); err != nil {
-		return err
+		return notes, err
 	}
-	ui.Note("updated .gitignore; commit it together with %s", "pit-externals.json")
-	return nil
+	return append(notes, "updated .gitignore; commit it together with pit-externals.json"), nil
 }
 
 // normalizeURL makes the spellings of one repo URL comparable: scheme, user, scp-like syntax, trailing slash and .git, case.
@@ -163,7 +196,7 @@ func cmdList(w *workspace.Workspace, args []string) error {
 	}
 	nameW, pathW, branchW, groupsW := 0, 0, 0, 0
 	for _, r := range repos {
-		nameW = max(nameW, len(r.Name))
+		nameW = max(nameW, len(r.Label()))
 		if !r.IsRoot() {
 			pathW, branchW = max(pathW, len(r.Path)), max(branchW, len(r.Ext.Branch))
 			groupsW = max(groupsW, len(groupList(r)))
@@ -171,7 +204,7 @@ func cmdList(w *workspace.Workspace, args []string) error {
 	}
 	for _, r := range repos {
 		if r.IsRoot() {
-			fmt.Printf("%s  (root repo)\n", ui.Pad(workspace.RootName, nameW))
+			fmt.Printf("%s  .\n", ui.Pad(r.Label(), nameW)) // the root directory itself
 			continue
 		}
 		line := ui.Pad(r.Name, nameW) + "  " + ui.Pad(r.Path, pathW) + "  " + ui.Pad(r.Ext.Branch, branchW) + "  "
@@ -180,7 +213,7 @@ func cmdList(w *workspace.Workspace, args []string) error {
 		}
 		line += r.Ext.URL
 		if !r.Cloned() {
-			line += "  (not cloned)"
+			line += "  " + ui.Yellow("(not cloned)")
 		}
 		fmt.Println(line)
 	}

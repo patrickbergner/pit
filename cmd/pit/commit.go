@@ -111,7 +111,7 @@ func cmdCommit(w *workspace.Workspace, args []string) error {
 		if s.err == nil && !amending[r.Name] && hasWork(s, plan.All) {
 			plan.Steps = append(plan.Steps, commitStep{Repo: r.Name})
 		} else if s.err == nil && !s.Clean() && !amending[r.Name] && !s.Conflicts() {
-			unstaged = append(unstaged, r.Name)
+			unstaged = append(unstaged, r.Label())
 		}
 	}
 	plan.Steps = inWorkspaceOrder(w, plan.Steps)
@@ -136,7 +136,7 @@ func cmdCommit(w *workspace.Workspace, args []string) error {
 	}
 	if len(problems) > 0 {
 		for _, pr := range problems {
-			fmt.Fprintf(os.Stderr, "pit: %s\n", pr)
+			ui.Error("%s", pr)
 		}
 		return errors.New("commit: nothing was committed")
 	}
@@ -195,7 +195,7 @@ func inWorkspaceOrder(w *workspace.Workspace, steps []commitStep) []commitStep {
 
 // preflight lists why committing in a repo would fail.
 func preflight(s repoStatus) []string {
-	name := s.repo.Name
+	name := s.repo.Label()
 	if s.err != nil {
 		return []string{fmt.Sprintf("%s: %s", name, s.err)}
 	}
@@ -238,19 +238,19 @@ func planAmend(w *workspace.Workspace, plan *commitPlan) (string, error) {
 		head, err := git.Output(r.Dir, "rev-parse", "HEAD")
 		switch {
 		case err != nil:
-			problems = append(problems, fmt.Sprintf("%s: %s", r.Name, err))
+			problems = append(problems, fmt.Sprintf("%s: %s", r.Label(), err))
 		case head != c.Hash:
-			problems = append(problems, fmt.Sprintf("%s: has moved on since the last pit commit (HEAD is no longer %.7s)", r.Name, c.Hash))
+			problems = append(problems, fmt.Sprintf("%s: has moved on since the last pit commit (HEAD is no longer %.7s)", r.Label(), c.Hash))
 		default:
 			if remotes, _ := git.Output(r.Dir, "branch", "-r", "--contains", c.Hash); strings.TrimSpace(remotes) != "" {
-				problems = append(problems, fmt.Sprintf("%s: %.7s is already pushed", r.Name, c.Hash))
+				problems = append(problems, fmt.Sprintf("%s: %.7s is already pushed", r.Label(), c.Hash))
 			}
 		}
 		plan.Steps = append(plan.Steps, commitStep{Repo: c.Repo, Amend: c.Hash})
 	}
 	if len(problems) > 0 {
 		for _, pr := range problems {
-			fmt.Fprintf(os.Stderr, "pit: %s\n", pr)
+			ui.Error("%s", pr)
 		}
 		return "", errors.New("commit --amend: can't amend the last pit commit; nothing was changed")
 	}
@@ -315,7 +315,7 @@ func template(oldMessage string, plan *commitPlan, statuses map[string]repoStatu
 		"# pit commits with this message in each of these repos:\n")
 	for _, st := range plan.Steps {
 		s := statuses[st.Repo]
-		b.WriteString("#\n# " + st.Repo)
+		b.WriteString("#\n# " + workspace.Label(st.Repo))
 		if s.Status != nil {
 			b.WriteString(" (" + s.branchLabel() + ")")
 		}
@@ -340,7 +340,8 @@ func template(oldMessage string, plan *commitPlan, statuses map[string]repoStatu
 	return b.String()
 }
 
-// runPlan commits in the plan's remaining repos, one after the other, saving progress after each. It stops at the first failure.
+// runPlan commits in the plan's remaining repos, one after the other, each in a block with what git reports, saving progress after each.
+// It stops at the first failure.
 func runPlan(w *workspace.Workspace, plan *commitPlan) error {
 	msgFile := w.StatePath(commitMsgFile)
 	if _, err := os.Stat(msgFile); err != nil {
@@ -358,42 +359,15 @@ func runPlan(w *workspace.Workspace, plan *commitPlan) error {
 		if err != nil {
 			return stopPlan(w, plan, i, err)
 		}
-		args := []string{"commit", "-q", "-F", msgFile}
-		if st.Amend != "" {
-			if head, _ := git.Output(r.Dir, "rev-parse", "HEAD"); head != st.Amend {
-				return stopPlan(w, plan, i, fmt.Errorf("%s has moved on (HEAD is no longer %.7s); not amending", r.Name, st.Amend))
-			}
-			args = append(args, "--amend")
-		} else {
-			s, err := workspace.ReadStatus(r, nil)
-			if err != nil {
-				return stopPlan(w, plan, i, err)
-			}
-			if !hasWork(repoStatus{r, s, nil}, plan.All) {
-				ui.Note("%s: nothing to commit anymore, skipped", r.Name)
-				st.Hash = "-"
-				continue
-			}
-		}
-		if plan.All {
-			args = append(args, "-a")
-		}
-		if plan.NoVerify {
-			args = append(args, "--no-verify")
-		}
-		if err := git.Pass(r.Dir, args...); err != nil {
-			return stopPlan(w, plan, i, fmt.Errorf("%s: git commit failed", r.Name))
-		}
-		hash, err := git.Output(r.Dir, "rev-parse", "HEAD")
+		header(r)
+		err = commitIn(r, st, plan, msgFile)
+		ui.End()
 		if err != nil {
 			return stopPlan(w, plan, i, err)
 		}
-		st.Hash = hash
 		if err := w.WriteState(inProgressFile, plan); err != nil {
 			return err
 		}
-		branch, _ := git.Output(r.Dir, "branch", "--show-current")
-		fmt.Printf("%s  %s  %.7s\n", r.Name, branch, hash)
 	}
 
 	var last lastCommit
@@ -408,12 +382,48 @@ func runPlan(w *workspace.Workspace, plan *commitPlan) error {
 	return w.RemoveState(inProgressFile)
 }
 
+// commitIn makes the step's commit in r and records its hash, "-" if there is nothing to commit anymore.
+func commitIn(r *workspace.Repo, st *commitStep, plan *commitPlan, msgFile string) error {
+	args := []string{"commit", "-F", msgFile}
+	if st.Amend != "" {
+		if head, _ := git.Output(r.Dir, "rev-parse", "HEAD"); head != st.Amend {
+			return fmt.Errorf("%s has moved on (HEAD is no longer %.7s); not amending", r.Label(), st.Amend)
+		}
+		args = append(args, "--amend")
+	} else {
+		s, err := workspace.ReadStatus(r, nil)
+		if err != nil {
+			return err
+		}
+		if !hasWork(repoStatus{r, s, nil}, plan.All) {
+			ui.Note("nothing to commit anymore, skipped")
+			st.Hash = "-"
+			return nil
+		}
+	}
+	if plan.All {
+		args = append(args, "-a")
+	}
+	if plan.NoVerify {
+		args = append(args, "--no-verify")
+	}
+	if err := git.Pass(r.Dir, args...); err != nil {
+		return fmt.Errorf("%s: git commit failed", r.Label())
+	}
+	hash, err := git.Output(r.Dir, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	st.Hash = hash
+	return nil
+}
+
 // stopPlan saves the plan after the step at index i failed and explains how to go on.
 func stopPlan(w *workspace.Workspace, plan *commitPlan, i int, cause error) error {
 	if err := w.WriteState(inProgressFile, plan); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "pit: %s\n", cause)
+	ui.Error("%s", cause)
 	reportPlan(plan)
 	return errors.New("fix the problem, then pit commit --continue (or pit commit --abort to leave it at that)")
 }
@@ -423,16 +433,16 @@ func reportPlan(plan *commitPlan) {
 	for _, st := range plan.Steps {
 		switch st.Hash {
 		case "":
-			pending = append(pending, st.Repo)
+			pending = append(pending, workspace.Label(st.Repo))
 		case "-":
 		default:
-			done = append(done, fmt.Sprintf("%s %.7s", st.Repo, st.Hash))
+			done = append(done, fmt.Sprintf("%s %.7s", workspace.Label(st.Repo), st.Hash))
 		}
 	}
 	if len(done) > 0 {
-		fmt.Fprintf(os.Stderr, "pit: committed: %s\n", strings.Join(done, ", "))
+		ui.Note("committed: %s", strings.Join(done, ", "))
 	}
 	if len(pending) > 0 {
-		fmt.Fprintf(os.Stderr, "pit: not committed yet: %s\n", strings.Join(pending, ", "))
+		ui.Note("not committed yet: %s", strings.Join(pending, ", "))
 	}
 }

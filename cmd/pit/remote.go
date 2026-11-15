@@ -12,7 +12,7 @@ import (
 	"github.com/patrickbergner/pit/internal/workspace"
 )
 
-// fetchAll fetches the repos in parallel. Output is printed per repo afterwards; quiet prints only failures.
+// fetchAll fetches the repos in parallel. Afterwards, each repo that printed something gets a block with it; quiet shows only failures.
 func fetchAll(repos []*workspace.Repo, opts []string, quiet bool) error {
 	type result struct {
 		out []byte
@@ -29,14 +29,17 @@ func fetchAll(repos []*workspace.Repo, opts []string, quiet bool) error {
 	for i, res := range results {
 		out := strings.TrimRight(string(res.out), "\n")
 		if res.err != nil {
-			failed = append(failed, repos[i].Name)
+			failed = append(failed, repos[i].Label())
 		} else if quiet || out == "" {
 			continue
 		}
-		ui.Header(repos[i].Name, repos[i].Path)
+		header(repos[i])
 		if out != "" {
 			fmt.Println(out)
+		} else {
+			ui.Error("%s", res.err)
 		}
+		ui.End()
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("fetch failed in %s", strings.Join(failed, ", "))
@@ -70,14 +73,14 @@ func cmdPull(w *workspace.Workspace, args []string) error {
 	for _, s := range readStatuses(targetsOf(repos)) {
 		switch {
 		case s.err != nil:
-			fmt.Fprintf(os.Stderr, "pit: %s: %s\n", s.repo.Name, s.err)
+			ui.Error("%s: %s", s.repo.Label(), s.err)
 		case explicit:
 			targets = append(targets, workspace.Target{Repo: s.repo})
 		case s.Detached:
-			ui.Note("%s: skipped, HEAD is detached", s.repo.Name)
+			ui.Note("%s: skipped, HEAD is detached", s.repo.Label())
 		case s.Upstream == "" || s.UpstreamGone:
 			if s.repo.HasRemotes() {
-				ui.Note("%s: skipped, %s has no upstream", s.repo.Name, s.Branch)
+				ui.Note("%s: skipped, %s has no upstream", s.repo.Label(), s.Branch)
 			}
 		default:
 			targets = append(targets, workspace.Target{Repo: s.repo})
@@ -106,7 +109,18 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 	if p.on("interactive") && p.on("yes") {
 		return errors.New("push: -i (ask) and -y (don't ask) exclude each other")
 	}
-	ask := (w.Config.Settings.AskBeforePush() || p.on("interactive")) && !p.on("yes")
+	// asks reports whether pit asks before pushing r: -y and -i decide for all repos, otherwise the settings for r's groups
+	asks := func(r *workspace.Repo) bool {
+		switch {
+		case p.on("yes"):
+			return false
+		case p.on("interactive"):
+			return true
+		case r.IsRoot():
+			return w.Config.Settings.AskBeforePush(nil)
+		}
+		return w.Config.Settings.AskBeforePush(r.Ext.Groups)
+	}
 	force := slices.ContainsFunc(p.opts, func(o string) bool {
 		return o == "-f" || o == "--force" || strings.HasPrefix(o, "--force-with-lease") || strings.HasPrefix(o, "--force-if-includes")
 	})
@@ -125,8 +139,8 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		r := s.repo
 		switch {
 		case s.err != nil:
-			problems = append(problems, fmt.Sprintf("%s: %s", r.Name, s.err))
-			unpushable = append(unpushable, r.Name)
+			problems = append(problems, fmt.Sprintf("%s: %s", r.Label(), s.err))
+			unpushable = append(unpushable, r.Label())
 			continue
 		case s.Unborn:
 			continue
@@ -146,11 +160,11 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 			continue
 		}
 		if s.Detached {
-			ui.Note("%s: skipped, HEAD is detached", r.Name)
+			ui.Note("%s: skipped, HEAD is detached", r.Label())
 			continue
 		}
 		if !git.OK(r.Dir, "remote", "get-url", "origin") {
-			ui.Note("%s: skipped, %s has no upstream and there is no remote 'origin'", r.Name, s.Branch)
+			ui.Note("%s: skipped, %s has no upstream and there is no remote 'origin'", r.Label(), s.Branch)
 			continue
 		}
 		remoteRef := "refs/remotes/origin/" + s.Branch
@@ -165,26 +179,38 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		fmt.Println("nothing to push")
 		return nil
 	}
+	// the plan: a block per repo with where it goes and the commits
 	var pushable []pushStep
 	for _, st := range steps {
-		head := fmt.Sprintf("%s  %s -> %s", st.repo.Name, st.branch, st.dest)
+		line := ui.Green(st.branch) + " -> " + st.dest
 		if st.setUp {
-			head += "  (sets upstream)"
+			line += "  (sets upstream)"
 		}
 		if st.blocked != "" {
-			head += "  (can't push)"
-			problems = append(problems, st.repo.Name+": "+st.blocked)
-			unpushable = append(unpushable, st.repo.Name)
+			line += "  " + ui.Red("(can't push)")
+			problems = append(problems, st.repo.Label()+": "+st.blocked)
+			unpushable = append(unpushable, st.repo.Label())
 		} else {
 			pushable = append(pushable, st)
 		}
-		fmt.Println(ui.Bold(head))
+		header(st.repo)
+		fmt.Println(line)
 		for _, c := range st.commits {
-			fmt.Println("  " + c)
+			hash, subject, _ := strings.Cut(c, " ")
+			fmt.Println("  " + ui.Yellow(hash) + " " + subject)
 		}
+		ui.End()
 	}
 	for _, pr := range problems {
-		fmt.Fprintf(os.Stderr, "pit: %s\n", pr)
+		ui.Error("%s", pr)
+	}
+	var asked, unasked []pushStep
+	for _, st := range pushable {
+		if asks(st.repo) {
+			asked = append(asked, st)
+		} else {
+			unasked = append(unasked, st)
+		}
 	}
 	switch {
 	case p.on("dry-run"):
@@ -192,7 +218,7 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 			return errSilent
 		}
 		return nil
-	case len(problems) > 0 && !ask:
+	case len(problems) > 0 && len(asked) == 0:
 		// Without questions nobody chose to leave these repos behind, so related commits elsewhere aren't pushed either.
 		return errors.New("push: nothing was pushed (pit push -i asks repo by repo and pushes the others)")
 	case len(pushable) == 0:
@@ -202,14 +228,28 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		ui.Note("skipping %s; asking about the other repos", strings.Join(unpushable, ", "))
 	}
 	steps = pushable
-	if ask {
-		if steps, err = askPush(steps); err != nil {
+	if len(asked) > 0 {
+		if len(unasked) > 0 {
+			names := make([]string, len(unasked))
+			for i, st := range unasked {
+				names[i] = st.repo.Label()
+			}
+			ui.Note("pushing %s without asking, as configured", strings.Join(names, ", "))
+		}
+		chosen, err := askPush(asked)
+		if err != nil {
 			return err
 		}
+		yes := map[*workspace.Repo]bool{}
+		for _, st := range chosen {
+			yes[st.repo] = true
+		}
+		steps = slices.DeleteFunc(steps, func(st pushStep) bool { return asks(st.repo) && !yes[st.repo] })
 		if len(steps) == 0 {
 			ui.Note("nothing pushed")
 			return notPushed(unpushable)
 		}
+		fmt.Fprintln(os.Stderr) // the questions end, the pushes begin
 	}
 
 	for i, st := range steps {
@@ -220,24 +260,27 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		if st.setUp {
 			args = append(args, "-u", "origin", st.branch)
 		}
-		if err := git.Pass(st.repo.Dir, append(args, p.opts...)...); err != nil {
+		header(st.repo)
+		err := git.Pass(st.repo.Dir, append(args, p.opts...)...)
+		ui.End()
+		if err != nil {
 			var pushed, rest []string
 			for _, d := range steps[:i] {
-				pushed = append(pushed, d.repo.Name)
+				pushed = append(pushed, d.repo.Label())
 			}
 			for _, d := range steps[i+1:] {
-				rest = append(rest, d.repo.Name)
+				rest = append(rest, d.repo.Label())
 			}
 			if len(pushed) > 0 {
-				fmt.Fprintf(os.Stderr, "pit: pushed: %s\n", strings.Join(pushed, ", "))
+				ui.Note("pushed: %s", strings.Join(pushed, ", "))
 			}
 			if len(rest) > 0 {
-				fmt.Fprintf(os.Stderr, "pit: not pushed yet: %s\n", strings.Join(rest, ", "))
+				ui.Note("not pushed yet: %s", strings.Join(rest, ", "))
 			}
 			if len(unpushable) > 0 {
-				fmt.Fprintf(os.Stderr, "pit: can't push: %s\n", strings.Join(unpushable, ", "))
+				ui.Note("can't push: %s", strings.Join(unpushable, ", "))
 			}
-			return fmt.Errorf("push failed in %s", st.repo.Name)
+			return fmt.Errorf("push failed in %s", st.repo.Label())
 		}
 	}
 	ui.Note("pushed %s", ui.Plural(len(steps), "repo"))
@@ -255,7 +298,7 @@ func notPushed(repos []string) error {
 const pushHelp = `y - push this repo
 n - don't push this repo
 a - push this repo and all remaining ones
-q - don't push this repo or any remaining one
+s - skip this repo and all remaining ones
 ? - show this help`
 
 // askPush asks repo by repo whether to push and returns the steps to do. All questions come before the first push, so a no costs nothing
@@ -263,7 +306,7 @@ q - don't push this repo or any remaining one
 func askPush(steps []pushStep) ([]pushStep, error) {
 	var chosen []pushStep
 	for i, st := range steps {
-		prompt := fmt.Sprintf("(%d/%d) Push %s: %s -> %s, %s? [y,n,a,q,?]", i+1, len(steps), st.repo.Name, st.branch, st.dest,
+		prompt := fmt.Sprintf("(%d/%d) Push %s: %s -> %s, %s? [y,n,a,s,?]", i+1, len(steps), st.repo.Label(), st.branch, st.dest,
 			ui.Plural(len(st.commits), "commit"))
 		for {
 			answer, err := ui.Ask(prompt, interruptCh)
@@ -278,7 +321,7 @@ func askPush(steps []pushStep) ([]pushStep, error) {
 			case "n", "no":
 			case "a", "all":
 				return append(chosen, steps[i:]...), nil
-			case "q", "quit":
+			case "s", "skip":
 				return chosen, nil
 			default:
 				fmt.Fprintln(os.Stderr, pushHelp)

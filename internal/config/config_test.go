@@ -27,12 +27,50 @@ func TestParseKeepsOrderAndDefaults(t *testing.T) {
 	}
 
 	c, err = Parse([]byte(`{}`))
-	if err != nil || c.Settings.DefaultBranch != "main" || len(c.Externals) != 0 || !c.Settings.AskBeforePush() {
+	if err != nil || c.Settings.DefaultBranch != "main" || len(c.Externals) != 0 || !c.Settings.AskBeforePush(nil) {
 		t.Errorf("empty config: %+v, %v", c, err)
 	}
 	for json, want := range map[string]bool{`{"settings": {"confirmPush": false}}`: false, `{"settings": {"confirmPush": true}}`: true} {
-		if c, err := Parse([]byte(json)); err != nil || c.Settings.AskBeforePush() != want {
-			t.Errorf("%s: AskBeforePush = %v, %v", json, c.Settings.AskBeforePush(), err)
+		if c, err := Parse([]byte(json)); err != nil || c.Settings.AskBeforePush(nil) != want {
+			t.Errorf("%s: AskBeforePush = %v, %v", json, c.Settings.AskBeforePush(nil), err)
+		}
+	}
+}
+
+func TestConfirmPushGroups(t *testing.T) {
+	const exts = `"externals": {
+		"x": {"url": "u", "path": "x", "groups": ["private"]},
+		"y": {"url": "u", "path": "y", "groups": ["public", "work"]}
+	}`
+	for _, tc := range []struct {
+		settings string
+		groups   []string
+		want     bool
+	}{
+		{`{"confirmPushGroups": {"private": false}}`, []string{"private"}, false},
+		{`{"confirmPushGroups": {"private": false}}`, []string{"public", "work"}, true}, // not overridden: confirmPush, default true
+		{`{"confirmPushGroups": {"private": false}}`, nil, true},                        // the root repo is in no group
+		{`{"confirmPush": false, "confirmPushGroups": {"work": true}}`, []string{"public", "work"}, true},
+		{`{"confirmPush": false, "confirmPushGroups": {"work": true}}`, nil, false},
+		{`{"confirmPushGroups": {"public": false, "work": false}}`, []string{"public", "work"}, false},
+		{`{"confirmPushGroups": {"public": false, "work": true}}`, []string{"public", "work"}, true}, // they disagree: asking wins
+	} {
+		c, err := Parse([]byte(`{"settings": ` + tc.settings + `, ` + exts + `}`))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.settings, err)
+		}
+		if got := c.Settings.AskBeforePush(tc.groups); got != tc.want {
+			t.Errorf("%s: AskBeforePush(%q) = %v, want %v", tc.settings, tc.groups, got, tc.want)
+		}
+	}
+
+	for _, tc := range []struct{ json, want string }{
+		{`{"settings": {"confirmPushGroups": {"privat": false}}, ` + exts + `}`, `no external is in group "privat" (groups: private, public, work)`},
+		{`{"settings": {"confirmPushGroups": {"private": false}}}`, `no external is in group "private" (no external has groups)`},
+		{`{"settings": {"confirmPushGroups": ["private"]}, ` + exts + `}`, "invalid JSON"},
+	} {
+		if _, err := Parse([]byte(tc.json)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Parse(%s) = %v, want an error containing %q", tc.json, err, tc.want)
 		}
 	}
 }

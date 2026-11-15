@@ -20,14 +20,18 @@ var version = "dev"
 
 const usage = `Usage: pit <command> [-r <repo>]... [-g <group>]... [options] [<path>...]
 
-pit runs git across the repos of a pit root: every external listed in
-pit-externals.json (found in the current directory or above), plus the
-root directory itself if it is a git repo (named "."). Every command covers
-all repos, wherever you run it. To narrow it down:
-  -r <repo>    this repo; "." is the root repo
-  -g <group>   the externals in this group (see "groups" in the config)
-  <path>...    the repos owning these paths
--r and -g can be repeated and combined (repos matching any of them).
+Runs git in all repos of a pit root: the externals in pit-externals.json
+(found here or above) and the root directory, if it is a git repo.
+
+Selecting repos (default: all, wherever you run pit):
+  -r <repo>                 A repo by name; "." is the root repo
+  -g <group>                The externals in a group
+  <path>...                 The repos owning these paths
+  -r and -g can be repeated and combined.
+
+Colors (default: on in a terminal, off if NO_COLOR is set):
+  --color[=<when>]          always, never or auto; also for git's output
+  --no-color                Same as --color=never
 
 Setup:
   sync                      Clone missing externals, check the others, and
@@ -52,19 +56,18 @@ Changes:
 
 Remotes:
   fetch [<git fetch options>]
+                            Fetch all repos
   pull [<git pull options>] Pull every repo that has an upstream
   push [-n] [-i | -y] [<git push options>]
-                            Show what each repo would push, ask repo by repo
-                            (settings.confirmPush, default on; -i asks, -y
-                            doesn't), then push. A repo that diverged from its
-                            upstream is skipped; without asking, it stops the
-                            whole push
+                            Show what each repo would push, ask, then push
+                            -n: only show; -i: ask; -y: don't ask
+                            (default: confirmPush, confirmPushGroups)
 
 Anything else:
   each [--] <git args>      Run a git command in each repo
   version                   Show the pit version
 
-Options for git that pit doesn't know are passed on to it: pit diff --staged,
+Options pit doesn't know go to git, e.g. pit diff --staged,
 pit pull --rebase, pit push --force-with-lease.
 `
 
@@ -87,7 +90,9 @@ func main() {
 			}
 		}
 	}()
-	os.Exit(run(os.Args[1:]))
+	code := run(os.Args[1:])
+	ui.Reset()
+	os.Exit(code)
 }
 
 type command struct {
@@ -116,6 +121,12 @@ var commands = map[string]command{
 }
 
 func run(args []string) int {
+	args, color, err := colorOptions(args)
+	git.SetColor(ui.SetColor(color))
+	if err != nil {
+		ui.Error("%s", err)
+		return 1
+	}
 	name := "help"
 	if len(args) > 0 {
 		name, args = args[0], args[1:]
@@ -130,16 +141,41 @@ func run(args []string) int {
 	}
 	c, ok := commands[name]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "pit: unknown command %q\n\n%s", name, usage)
+		ui.Error("unknown command %q", name)
+		fmt.Fprint(os.Stderr, "\n"+usage)
 		return 1
 	}
 	if err := runCommand(c, args); err != nil {
 		if !errors.Is(err, errSilent) {
-			fmt.Fprintf(os.Stderr, "pit: %s\n", err)
+			ui.Error("%s", err)
 		}
 		return 1
 	}
 	return 0
+}
+
+// colorOptions takes --color[=<when>] and --no-color out of args, wherever they come before a "--": before the command or among its
+// options. The last one counts; color is "" if there is none.
+func colorOptions(args []string) (rest []string, color string, err error) {
+	for i, a := range args {
+		switch {
+		case a == "--":
+			return append(rest, args[i:]...), color, nil
+		case a == "--no-color":
+			color = ui.ColorNever
+		case a == "--color":
+			color = ui.ColorAlways
+		case strings.HasPrefix(a, "--color="):
+			switch color = strings.TrimPrefix(a, "--color="); color {
+			case ui.ColorAlways, ui.ColorNever, ui.ColorAuto:
+			default:
+				return nil, "", fmt.Errorf("invalid value %q for --color (always, never or auto)", color)
+			}
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, color, nil
 }
 
 func runCommand(c command, args []string) error {

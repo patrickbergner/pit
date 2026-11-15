@@ -77,9 +77,9 @@ forge/                     <- the root; here a git repo itself
     public/                <- external "pit"
 ```
 
-pit works on all **externals** in config order, plus the **root repo** if the root is a git repo. The root repo is named `.` and always
-comes last. Every file belongs to the external whose path contains it, otherwise to the root repo (or to no repo, if the root is not a
-git repo).
+pit works on all **externals** in config order, plus the **root repo** if the root is a git repo. The root repo is selected as `.` (`-r .`),
+shows up as `(pit root)` in output, and always comes last. Every file belongs to the external whose path contains it, otherwise to the
+root repo (or to no repo, if the root is not a git repo).
 
 ## Commands
 
@@ -119,6 +119,32 @@ Paths in output are relative to the current directory, like git prints them. Opt
 `status`, `log` and `fetch` work on the repos in parallel. Everything that changes something runs repo by repo, in config order, root
 last, and holds a lock (`.pit/lock`) so two pit commands don't interleave.
 
+### Output and colors
+
+Commands that go through the repos show each repo's output in a block of its own: a header line with the repo's name (and its path, if
+that differs) ruled out to column 80, the output, then an empty line.
+
+```
+$ pit pull
+─── pit (pit/public) ───────────────────────────────────────────────────────────
+Already up to date.
+
+─── bond (bond/public) ─────────────────────────────────────────────────────────
+Updating 1a2b3c4..5d6e7f8
+Fast-forward
+ README.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+```
+
+`sync`, `status`, `fetch`, `pull`, `push`, `commit` and `each` all do this; `add` and `restore` do it only with `-p` / `-i`, when git asks
+hunk by hunk. `diff` and `log` stay one diff and one log of the whole tree, and `list` is one table.
+
+pit colors its output lightly, when it goes to a terminal: the headers, the branches and changes in `status`, questions, warnings and
+errors. On Windows, that's a console as well as Git Bash's mintty. `NO_COLOR` set to anything turns colors off. `--color[=always|never|auto]`
+or `--no-color`, before or after the command, decides it either way; that goes for the output of git that pit shows, too
+(`pit --color diff | less -R`).
+
 ### `pit sync`
 
 For each external:
@@ -130,7 +156,8 @@ For each external:
 - **Exists, but isn't empty and isn't a repo:** an error for this external. pit never overwrites or adopts content.
 
 Then it updates the root repo's `.gitignore` (see [below](#keeping-the-externals-out-of-the-root-repo)). An external removed from the config
-is reported, and its directory is left as it is.
+is reported, and its directory is left as it is. Externals that were cloned already, with the configured origin, are summed up in one
+line.
 
 To add or remove an external, edit `pit-externals.json` and run `pit sync`. If the root is a git repo, commit the config together with
 `.gitignore`.
@@ -142,17 +169,23 @@ until `pit sync` has fixed the `.gitignore`, since the root repo would otherwise
 
 ```
 $ pit status
-pit    main        ↑2 ↓1
+─── pit (pit/public) ───────────────────────────────────────────────────────────
+main  ↑2 ↓1
    M pit/public/cmd/pit/main.go
   ?? pit/public/concept.md
-bond   feature/x   (expected main)
+
+─── bond (bond/public) ─────────────────────────────────────────────────────────
+feature/x  (expected main)
    M bond/public/README.md
-.      main        ↑1
+
+─── (pit root) ─────────────────────────────────────────────────────────────────
+main  ↑1
    M pit-externals.json
+
 9 more repos clean and up to date
 ```
 
-Per repo: name, branch, commits ahead (↑) and behind (↓) its upstream, and the changed files in `git status --short` format. Notes point
+Per repo: branch, commits ahead (↑) and behind (↓) its upstream, and the changed files in `git status --short` format. Notes point
 out what's unusual: a branch other than the configured one, a detached HEAD, a merge or rebase in progress, a missing or deleted upstream,
 a repo without commits. Clean repos with nothing to note are summed up in the last line.
 
@@ -174,7 +207,8 @@ The core of pit: one message, one commit per repo.
 3. **Message.** From `-m` (several are joined as paragraphs, as with git), `-F <file>`, or from git's editor, opened once with a list
    of the changes in every repo.
 4. **Commit** in each repo, one after the other, root last. Each repo's own hooks run as usual; `-n` (`--no-verify`) skips them.
-5. **Report** one line per repo: name, branch, commit.
+5. **Report** git's summary of each commit (`[main 1a2b3c4] ...`, the files changed) in the repo's block, along with what its hooks
+   printed.
 
 The commits are independent. There is no cross-repo atomicity, and pit doesn't pretend there is. If a commit fails halfway, typically
 because of a hook, pit stops and lists what was committed and what wasn't. Fix the problem, then
@@ -198,7 +232,7 @@ In the repos, nothing links the commits of one pit commit besides their message,
 Merges the logs of all repos, newest first, 20 entries unless you give `-n <count>` (or `-<count>`):
 
 ```
-commit pit 1a2b3c4, bond 5d6e7f8, . 9a8b7c6
+commit pit 1a2b3c4, bond 5d6e7f8, (pit root) 9a8b7c6
 Author: You <you@example.com>
 Date:   Sat Nov 14 10:23:45 2026 +0100
 
@@ -219,26 +253,29 @@ The summary lists what needs attention, and you resolve it in that repo with git
 
 ### `pit push`
 
-`pit push` fetches first, then shows the plan: for each repo the branch, where it goes, and the commits about to be pushed. A repo that has
+`pit push` fetches first, then shows the plan: a block per repo with the branch, where it goes, and the commits about to be pushed. A repo that has
 diverged from its upstream is marked `(can't push)`, since git would reject its push; `pit pull` it first. (Passing `--force`,
 `--force-with-lease` or `--force-if-includes` lifts that check.)
 
 Next, pit asks repo by repo whether to push it. Repos that can't be pushed are skipped, and you're still asked about all the others:
 
 ```
-(1/3) Push pit: main -> origin/main, 2 commits? [y,n,a,q,?] y
-(2/3) Push bond: feature/x -> origin/feature/x, 1 commit? [y,n,a,q,?] n
-(3/3) Push .: main -> origin/main, 1 commit? [y,n,a,q,?] y
+(1/3) Push pit: main -> origin/main, 2 commits? [y,n,a,s,?] y
+(2/3) Push bond: feature/x -> origin/feature/x, 1 commit? [y,n,a,s,?] n
+(3/3) Push (pit root): main -> origin/main, 1 commit? [y,n,a,s,?] y
 ```
 
-`y` pushes the repo, `n` skips it, `a` pushes it and all remaining ones, `q` skips it and all remaining ones. All questions come before the
-first push, so you can still change your mind by answering `q` or pressing Ctrl-C: nothing has been pushed until the last answer.
+`y` pushes the repo, `n` doesn't, `a` pushes it and all remaining ones, `s` skips it and all remaining ones (repos answered with `y` before
+are still pushed). All questions come before the first push, so nothing has been pushed until the last answer, and Ctrl-C during the
+questions pushes nothing at all.
 Without an answer (stdin closed), pit pushes nothing.
 
-Asking is on by default. `"confirmPush": false` in the [settings](#configuration) turns it off, and on the command line `-y` (`--yes`)
-pushes without asking and `-i` (`--interactive`) asks, whatever the config says. **Without asking, a repo that can't be pushed stops
-the whole push**: nobody chose to leave it behind, and related commits in the other repos shouldn't go out without it. `pit push -i`
-lets you push the others anyway.
+Asking is on by default. `"confirmPush": false` in the [settings](#configuration) turns it off. `confirmPushGroups` overrides it for
+the externals in some groups, e.g. `{"private": false}` pushes the `private` externals without asking while pit still asks about the
+others. Repos that need no question are pushed along with the ones you answer `y` for (pit names them before asking); Ctrl-C or no answer
+still pushes nothing. On the command line, `-y` (`--yes`) pushes without asking and `-i` (`--interactive`) asks about every repo, whatever
+the config says. **Without any question, a repo that can't be pushed stops the whole push**: nobody chose to leave it behind, and
+related commits in the other repos shouldn't go out without it. `pit push -i` lets you push the others anyway.
 
 Then it pushes the chosen repos one by one, root last. If one fails, pit stops and lists what was pushed and what wasn't. A branch without
 upstream is pushed to `origin` with `-u`. `-n` (`--dry-run`) shows the plan only, without asking. pit exits with an error whenever a repo
@@ -254,7 +291,7 @@ pit each -r mylib -r tool -- tag v1.0
 pit each stash
 ```
 
-Runs the git command in each repo, its output under a header per repo, and fails if it failed anywhere.
+Runs the git command in each repo, its output in a block per repo, and fails if it failed anywhere.
 
 ## Configuration
 
@@ -264,7 +301,8 @@ Runs the git command in each repo, its output under a header per repo, and fails
 {
   "settings": {
     "defaultBranch": "main",
-    "confirmPush": true
+    "confirmPush": true,
+    "confirmPushGroups": { "go": false }
   },
   "externals": {
     "mylib": { "url": "https://github.com/you/mylib.git", "path": "libs/mylib", "groups": ["libs", "go"] },
@@ -277,6 +315,7 @@ Runs the git command in each repo, its output under a header per repo, and fails
 |---|---|
 | `settings.defaultBranch` | Branch of externals that set none (default `main`) |
 | `settings.confirmPush` | Whether `pit push` asks repo by repo before pushing (default `true`); `-y` / `-i` override it |
+| `settings.confirmPushGroups` | `confirmPush` for the externals of these groups, e.g. `{"private": false}`; for an external in several of them that disagree, asking wins. The root repo is in no group |
 | `externals.<name>` | Name used with `-r` and in output; letters, digits, `.`, `_`, `-` |
 | `url` | Clone URL (required) |
 | `path` | Directory relative to the root, with forward slashes (required) |

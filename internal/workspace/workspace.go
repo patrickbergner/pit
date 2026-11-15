@@ -15,8 +15,19 @@ import (
 	"github.com/patrickbergner/pit/internal/config"
 )
 
-// RootName is how the root repo is named on the command line and in output.
+// RootName is how the root repo is named on the command line (-r .) and in pit's state.
 const RootName = "."
+
+// RootLabel is how output names the root repo.
+const RootLabel = "(pit root)"
+
+// Label returns how output names the repo called name: by its name, the root repo as RootLabel.
+func Label(name string) string {
+	if name == RootName {
+		return RootLabel
+	}
+	return name
+}
 
 // Repo is one repository of the workspace.
 type Repo struct {
@@ -27,6 +38,9 @@ type Repo struct {
 }
 
 func (r *Repo) IsRoot() bool { return r.Ext == nil }
+
+// Label is how output names the repo (see Label).
+func (r *Repo) Label() string { return Label(r.Name) }
 
 // Cloned reports whether the repo's directory is a git repository.
 func (r *Repo) Cloned() bool { return isRepo(r.Dir) }

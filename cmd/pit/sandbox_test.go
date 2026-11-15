@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestMain(m *testing.M) {
@@ -216,6 +217,12 @@ func (s *sandbox) standard() string {
 	s.commitAll(root, "track externals")
 	s.git(root, "push", "-q")
 	return root
+}
+
+// block is how a repo's block starts in output without colors: the header with its title ("b (nested/b)"), a rule to column 80, then
+// the beginning of the output.
+func block(title, output string) string {
+	return "─── " + title + " " + strings.Repeat("─", 80-5-utf8.RuneCountInString(title)) + "\n" + output
 }
 
 func contains(t *testing.T, out string, want ...string) {

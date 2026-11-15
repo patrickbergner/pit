@@ -34,11 +34,13 @@ func TestSyncClonesAndIgnores(t *testing.T) {
 	root := s.root(true, ext{"a", s.remote("a", false), "a"}, ext{"b", s.remote("b", false), "nested/b"}, ext{"e", empty, "e"})
 	s.write(root, ".gitignore", "*.log\n")
 
-	contains(t, s.pit(root, "list"), "a  a ", "nested/b", "(not cloned)", ".  (root repo)")
+	// the names are padded to the root repo's label; its path is the root itself
+	contains(t, s.pit(root, "list"), "a"+strings.Repeat(" ", 11)+"a ", "nested/b", "(not cloned)", "\n(pit root)  .\n")
 	contains(t, s.pit(root, "status"), "not cloned (pit sync)")
 
 	out := s.pit(root, "sync")
-	contains(t, out, "cloning a into a", "cloning b into nested/b", "updated .gitignore")
+	contains(t, out, block("a", "Cloning into 'a'...\n"), block("b (nested/b)", "Cloning into 'nested/b'...\n"),
+		block("(pit root)", "pit: updated .gitignore"))
 	// plain clones: git works in them as usual
 	if got := s.git(s.path("forge/nested/b"), "remote", "get-url", "origin"); got != fileURL(s.path("remotes/b.git")) {
 		t.Errorf("origin of b = %s", got)
@@ -55,7 +57,9 @@ func TestSyncClonesAndIgnores(t *testing.T) {
 	}
 
 	// idempotent
-	lacks(t, s.pit(root, "sync"), "cloning", "updated")
+	out = s.pit(root, "sync")
+	contains(t, out, "all 3 externals already cloned")
+	lacks(t, out, "Cloning", "updated", "───")
 	if s.read(root, ".gitignore") != ignore {
 		t.Error("second sync changed .gitignore")
 	}
@@ -68,7 +72,7 @@ func TestSyncClonesAndIgnores(t *testing.T) {
 	// a dropped external is reported, not deleted
 	s.config(root, ext{"a", s.remote("a2", false), "a"})
 	out = s.pit(root, "sync")
-	contains(t, out, "nested/b is no longer an external", "origin is")
+	contains(t, out, block("a", "pit: warning: origin is "), block("(pit root)", "pit: nested/b is no longer an external"))
 	if !s.exists(root, "nested/b/README.md") {
 		t.Error("sync deleted a dropped external's clone")
 	}
@@ -86,7 +90,7 @@ func TestSyncRefusesForeignContent(t *testing.T) {
 	os.Remove(s.path("forge/t/x.txt"))
 
 	out := s.pitFails(root, "sync")
-	contains(t, out, "a exists and is not empty", "the root repo tracks files in t")
+	contains(t, out, block("a", "pit: a exists and is not empty"), block("t", "pit: the root repo tracks files in t"), "sync failed in a, t")
 	if s.read(root, "a/keep.txt") != "mine\n" {
 		t.Error("sync touched a/")
 	}
@@ -119,7 +123,8 @@ func TestStatusAndPathRouting(t *testing.T) {
 	s.write(root, "nested/b/README.md", "changed\n")
 	s.write(root, "notes.md", "changed\n")
 	out := s.pit(root, "status")
-	contains(t, out, "a  main", "?? a/new.txt", " M nested/b/README.md", " M notes.md")
+	contains(t, out, block("a", "main\n  ?? a/new.txt\n\n"), block("b (nested/b)", "main\n   M nested/b/README.md\n\n"),
+		block("(pit root)", "main\n   M notes.md\n\n"))
 
 	// from a subdirectory, paths are relative to it; inside an external, pit still sees the whole root
 	out = s.pit(s.path("forge/nested/b"), "status")
@@ -127,7 +132,7 @@ func TestStatusAndPathRouting(t *testing.T) {
 
 	// paths narrow the repos; a directory covers the externals below it
 	out = s.pit(root, "status", "nested")
-	contains(t, out, "b  main", "README.md")
+	contains(t, out, block("b (nested/b)", "main\n"), "README.md")
 	lacks(t, out, "new.txt", "notes.md")
 
 	// add routes each path to its repo
@@ -152,7 +157,7 @@ func TestStatusAndPathRouting(t *testing.T) {
 
 	// a different branch than configured is pointed out
 	s.git(s.path("forge/a"), "switch", "-q", "-c", "topic")
-	contains(t, s.pit(root, "status", "-r", "a"), "a  topic", "expected main")
+	contains(t, s.pit(root, "status", "-r", "a"), block("a", "topic  (expected main, "))
 }
 
 func TestCommitAcrossRepos(t *testing.T) {
@@ -162,12 +167,13 @@ func TestCommitAcrossRepos(t *testing.T) {
 
 	s.write(root, "a/x.txt", "x\n")
 	s.write(root, "notes.md", "more\n")
-	contains(t, s.pitFails(root, "commit", "-m", "x"), "nothing staged", "changes in a, .")
+	contains(t, s.pitFails(root, "commit", "-m", "x"), "nothing staged", "changes in a, (pit root)")
 
 	s.pit(root, "add", "-A")
+	// a block per repo with git's report of the commit
 	out := s.pit(root, "commit", "-m", "Add x", "-m", "Body")
-	contains(t, out, "a  main  ", ".  main  ")
-	lacks(t, out, "b  ")
+	contains(t, out, block("a", "[main "), "] Add x\n 1 file changed", block("(pit root)", "[main "))
+	lacks(t, out, "─── b")
 	for _, dir := range []string{"forge/a", "forge"} {
 		if got := s.git(s.path(dir), "log", "-1", "--format=%B"); got != "Add x\n\nBody" {
 			t.Errorf("%s: message %q", dir, got)
@@ -191,7 +197,7 @@ func TestCommitAcrossRepos(t *testing.T) {
 
 	// the log shows a pit commit as one entry
 	out = s.pit(root, "log")
-	contains(t, out, "commit b ", "    Change b", "commit a ", ", . ", "    Add x", "    Body", "commit . ", "init forge")
+	contains(t, out, "commit b ", "    Change b", "commit a ", ", (pit root) ", "    Add x", "    Body", "commit (pit root) ", "init forge")
 	if strings.Count(out, "Add x") != 1 {
 		t.Errorf("Add x not grouped:\n%s", out)
 	}
@@ -225,14 +231,14 @@ func TestCommitContinueAfterHookFailure(t *testing.T) {
 	s.write(root, "notes.md", "z\n")
 	s.pit(root, "add", "-A")
 	out := s.pitFails(root, "commit", "-m", "Together")
-	contains(t, out, "hook says no", "committed: a ", "not committed yet: b, .", "pit commit --continue")
+	contains(t, out, block("b (nested/b)", "hook says no\n\n"), "committed: a ", "not committed yet: b, (pit root)", "pit commit --continue")
 
 	contains(t, s.pitFails(root, "commit", "-m", "Other"), "stopped halfway")
 
 	os.Remove(hook)
 	out = s.pit(root, "commit", "--continue")
-	contains(t, out, "b  main", ".  main")
-	lacks(t, out, "a  main")
+	contains(t, out, block("b (nested/b)", "[main "), block("(pit root)", "[main "))
+	lacks(t, out, "─── a")
 	if got := s.git(s.path("forge/nested/b"), "log", "-1", "--format=%s"); got != "Together" {
 		t.Errorf("b: %q", got)
 	}
@@ -270,7 +276,7 @@ func TestCommitAmend(t *testing.T) {
 	s.write(root, "nested/b/fix.txt", "fix\n")
 	s.pit(root, "add", "nested/b")
 	out := s.pit(root, "commit", "--amend", "-m", "First")
-	contains(t, out, "a  main", "b  main", ".  main")
+	contains(t, out, block("a", "[main "), block("b (nested/b)", "[main "), block("(pit root)", "[main "))
 	for _, dir := range []string{"forge/a", "forge/nested/b", "forge"} {
 		if got := s.git(s.path(dir), "log", "-1", "--format=%s"); got != "First" {
 			t.Errorf("%s: %q", dir, got)
@@ -332,11 +338,16 @@ func TestPushPullFetch(t *testing.T) {
 	s.pit(root, "commit", "-m", "Publish x")
 
 	out := s.pit(root, "push", "-n")
-	contains(t, out, "a  main -> origin/main", "Publish x", ".  main -> origin/main")
+	contains(t, out, block("a", "main -> origin/main\n  "), " Publish x\n\n", block("(pit root)", "main -> origin/main\n"))
 	if s.git(s.path("forge/a"), "status", "-sb") != "## main...origin/main [ahead 1]" {
 		t.Error("dry run pushed")
 	}
-	contains(t, s.pit(root, "push", "-y"), "pushed 2 repos")
+	// the plan, then a block per push with git's output
+	out = s.pit(root, "push", "-y")
+	contains(t, out, block("a", "To file://"), block("(pit root)", "To file://"), "pushed 2 repos")
+	if n := strings.Count(out, block("a", "")); n != 2 {
+		t.Errorf("a has %d blocks, want 2 (plan and push):\n%s", n, out)
+	}
 	if got := s.git(s.dir, "--git-dir="+s.path("remotes/a.git"), "log", "-1", "--format=%s", "main"); got != "Publish x" {
 		t.Errorf("remote a: %q", got)
 	}
@@ -352,7 +363,7 @@ func TestPushPullFetch(t *testing.T) {
 	s.pit(root, "add", "-A")
 	s.pit(root, "commit", "-m", "Mine")
 	out = s.pitFails(root, "push", "-y")
-	contains(t, out, "b  main -> origin/main  (can't push)", "b: main and origin/main have diverged", "nothing was pushed",
+	contains(t, out, block("b (nested/b)", "main -> origin/main  (can't push)"), "b: main and origin/main have diverged", "nothing was pushed",
 		"pit push -i asks repo by repo")
 	if s.git(s.dir, "--git-dir="+s.path("remotes/a.git"), "log", "-1", "--format=%s", "main") != "Publish x" {
 		t.Error("a was pushed although b diverged")
@@ -369,9 +380,9 @@ func TestPushPullFetch(t *testing.T) {
 		t.Error("a wasn't pushed")
 	}
 
-	contains(t, s.pit(root, "status"), "b  main  ↑1 ↓1")
+	contains(t, s.pit(root, "status"), block("b (nested/b)", "main  ↑1 ↓1\n"))
 	out = s.pit(root, "pull", "--no-edit")
-	contains(t, out, "=== b (nested/b)", "=== a")
+	contains(t, out, block("a", "Already up to date.\n\n"), block("b (nested/b)", ""))
 	if !s.exists(root, "nested/b/theirs.txt") {
 		t.Error("pull didn't bring theirs.txt")
 	}
@@ -382,7 +393,7 @@ func TestPushPullFetch(t *testing.T) {
 	s.write(root, "a/t.txt", "t\n")
 	s.pit(root, "add", "a")
 	s.pit(root, "commit", "-m", "Topic")
-	contains(t, s.pit(root, "push", "--yes"), "a  topic -> origin/topic  (sets upstream)")
+	contains(t, s.pit(root, "push", "--yes"), block("a", "topic -> origin/topic  (sets upstream)\n"))
 	if got := s.git(s.path("forge/a"), "rev-parse", "--abbrev-ref", "@{upstream}"); got != "origin/topic" {
 		t.Errorf("upstream = %s", got)
 	}
@@ -409,17 +420,17 @@ func TestPushAsksRepoByRepo(t *testing.T) {
 	if err == nil {
 		t.Fatalf("push without answers succeeded:\n%s", out)
 	}
-	contains(t, out, "a  main -> origin/main", "Everywhere", "(1/3) Push a: main -> origin/main, 1 commit?", "no answer on stdin")
+	contains(t, out, block("a", "main -> origin/main\n"), "Everywhere", "(1/3) Push a: main -> origin/main, 1 commit?", "no answer on stdin")
 	if remoteHead("a") != "init a" {
 		t.Error("a was pushed without an answer")
 	}
 
 	// an unknown answer shows the help and asks again; q skips the rest
-	out, err = s.pitInput(root, "x\nn\ny\nq\n", nil, "push")
+	out, err = s.pitInput(root, "x\nn\ny\ns\n", nil, "push")
 	if err != nil {
 		t.Fatalf("push: %v\n%s", err, out)
 	}
-	contains(t, out, "a - push this repo and all remaining ones", "(2/3) Push b:", "(3/3) Push .:", "pushed 1 repo")
+	contains(t, out, "a - push this repo and all remaining ones", "(2/3) Push b:", "(3/3) Push (pit root):", "pushed 1 repo")
 	if remoteHead("a") != "init a" || remoteHead("b") != "Everywhere" || s.git(s.dir, "--git-dir="+s.path("remotes/forge.git"), "log", "-1",
 		"--format=%s", "main") != "track externals" {
 		t.Error("expected exactly b to be pushed")
@@ -455,12 +466,16 @@ func TestPushAsksRepoByRepo(t *testing.T) {
 func TestEach(t *testing.T) {
 	s := newSandbox(t)
 	root := s.standard()
+	// a block per repo: a header, the output, an empty line
 	out := s.pit(root, "each", "--", "rev-parse", "--abbrev-ref", "HEAD")
-	contains(t, out, "=== a\nmain", "=== b (nested/b)\nmain", "=== .\nmain")
+	want := block("a", "main\n\n") + block("b (nested/b)", "main\n\n") + block("(pit root)", "main\n\n")
+	if out != want {
+		t.Errorf("each output:\n%s\nwant:\n%s", out, want)
+	}
 	out = s.pit(root, "each", "-r", "a", "log", "--format=%s")
 	contains(t, out, "init a")
 	lacks(t, out, "init b")
-	contains(t, s.pitFails(root, "each", "frobnicate"), "failed in a, b, .")
+	contains(t, s.pitFails(root, "each", "frobnicate"), "failed in a, b, (pit root)")
 }
 
 func TestGroups(t *testing.T) {
@@ -474,18 +489,18 @@ func TestGroups(t *testing.T) {
 
 	// sync and list take groups too
 	out := s.pit(root, "sync", "-g", "go")
-	contains(t, out, "cloning a")
-	lacks(t, out, "cloning b", "cloning c")
+	contains(t, out, block("a", "Cloning into 'a'"))
+	lacks(t, out, "─── b", "─── c")
 	out = s.pit(root, "list")
 	contains(t, out, "[libs, go]", "[libs]    ", "(not cloned)")
 	out = s.pit(root, "list", "-g", "libs")
 	contains(t, out, "a  ", "b  ")
-	lacks(t, out, "c  ", "(root repo)")
+	lacks(t, out, "c  ", "(pit root)")
 
 	// status lists the group's uncloned members; other commands leave them out
 	out = s.pit(root, "status", "-g", "libs")
-	contains(t, out, "b  not cloned", "1 repo clean")
-	lacks(t, out, "c  not cloned")
+	contains(t, out, block("b", "not cloned (pit sync)\n\n"), "1 repo clean")
+	lacks(t, out, "─── c")
 	s.pit(root, "sync")
 	s.commitAll(root, "track externals")
 
@@ -500,10 +515,10 @@ func TestGroups(t *testing.T) {
 	// -r and -g combine: the group plus the root repo
 	s.pit(root, "add", "-r", ".", "notes.md")
 	out = s.pit(root, "commit", "-g", "libs", "-r", ".", "-m", "Libs")
-	contains(t, out, "a  main", "b  main", ".  main")
-	lacks(t, out, "c  main")
+	contains(t, out, block("a", "[main "), block("b", "[main "), block("(pit root)", "[main "))
+	lacks(t, out, "─── c")
 
-	contains(t, s.pit(root, "each", "-g", "go", "--", "log", "-1", "--format=%s"), "=== a\nLibs")
+	contains(t, s.pit(root, "each", "-g", "go", "--", "log", "-1", "--format=%s"), block("a", "Libs\n"))
 	contains(t, s.pitFails(root, "status", "-g", "nope"), `unknown group "nope" (groups: libs, go)`)
 	contains(t, s.pitFails(root, "commit", "--amend", "-g", "libs", "-m", "x"), "doesn't take -r or -g")
 }
@@ -514,4 +529,123 @@ func TestLock(t *testing.T) {
 	s.write(root, ".pit/lock", "1\n")
 	contains(t, s.pitFails(root, "add", "-A"), "another pit command is running")
 	s.pit(root, "status") // read-only commands don't lock
+}
+
+func TestColor(t *testing.T) {
+	s := newSandbox(t)
+	root := s.standard()
+	s.write(root, "a/README.md", "changed\n")
+	const esc = "\x1b["
+
+	// not a terminal: no colors, unless asked for, before the command or after it
+	lacks(t, s.pit(root, "status"), esc)
+	for _, args := range [][]string{{"--color=always", "status"}, {"status", "--color"}} {
+		contains(t, s.pit(root, args...), "\x1b[1;36ma\x1b[0m", "\x1b[32mmain\x1b[0m", "\x1b[31mM\x1b[0m")
+	}
+	// the last one counts; after "--" they are git's
+	lacks(t, s.pit(root, "--color", "status", "--no-color"), esc)
+	contains(t, s.pit(root, "--color=always", "each", "-r", "a", "--", "log", "-1", "--no-color", "--format=%s"), "\x1b[1;36ma\x1b[0m", "\ninit a\n")
+	// questions and errors on stderr too
+	s.git(s.path("forge/a"), "commit", "-qam", "Change a")
+	out, _ := s.pitInput(root, "", nil, "--color=always", "push", "-i")
+	contains(t, out, "\x1b[1;34m(1/1) Push a:", "\x1b[1;31mpit:\x1b[0m push: no answer")
+	contains(t, s.pitFails(root, "--color=sometimes", "status"), `invalid value "sometimes" for --color`)
+
+	// git's output follows: --no-color and NO_COLOR win over the repo's color.ui, --color over NO_COLOR
+	s.write(root, "a/README.md", "changed again\n")
+	s.git(s.path("forge/a"), "config", "color.ui", "always")
+	contains(t, s.pit(root, "diff"), esc)
+	lacks(t, s.pit(root, "diff", "--no-color"), esc)
+	noColor := []string{"NO_COLOR=1"}
+	for _, args := range [][]string{{"diff"}, {"status"}} {
+		out, err := s.pitEnv(root, noColor, args...)
+		if err != nil || strings.Contains(out, esc) {
+			t.Errorf("NO_COLOR pit %s: %v\n%q", args, err, out)
+		}
+	}
+	if out, _ := s.pitEnv(root, noColor, "--color", "diff"); !strings.Contains(out, esc) {
+		t.Errorf("NO_COLOR pit --color diff has no colors:\n%q", out)
+	}
+}
+
+func TestAddPatchNamesRepos(t *testing.T) {
+	s := newSandbox(t)
+	root := s.standard()
+	s.write(root, "a/README.md", "changed a\n")
+	s.write(root, "nested/b/README.md", "changed b\n")
+	// git asks hunk by hunk, so each repo gets a block; plain add stays silent
+	out, err := s.pitInput(root, "y\nn\n", nil, "add", "-p")
+	if err != nil {
+		t.Fatalf("pit add -p: %v\n%s", err, out)
+	}
+	contains(t, out, block("a", "diff --git a/README.md"), block("b (nested/b)", "diff --git a/README.md"))
+	if got := s.git(s.path("forge/a"), "diff", "--cached", "--name-only"); got != "README.md" {
+		t.Errorf("a staged %q", got)
+	}
+	if got := s.git(s.path("forge/nested/b"), "diff", "--cached", "--name-only"); got != "" {
+		t.Errorf("b staged %q", got)
+	}
+	if out := s.pit(root, "add", "-A"); out != "" {
+		t.Errorf("pit add -A printed %q", out)
+	}
+}
+
+func TestPushConfirmPushGroups(t *testing.T) {
+	s := newSandbox(t)
+	root := s.standard()
+	remoteHead := func(name string) string {
+		t.Helper()
+		return s.git(s.dir, "--git-dir="+s.path("remotes/"+name+".git"), "log", "-1", "--format=%s", "main")
+	}
+	s.write(root, "pit-externals.json", `{
+  "settings": {"confirmPushGroups": {"private": false}},
+  "externals": {
+    "a": {"url": "`+fileURL(s.path("remotes/a.git"))+`", "path": "a", "groups": ["private"]},
+    "b": {"url": "`+fileURL(s.path("remotes/b.git"))+`", "path": "nested/b", "groups": ["public"]}
+  }
+}`)
+	for _, r := range []string{"a", "nested/b"} {
+		s.write(root, r+"/x.txt", "x\n")
+	}
+	s.pit(root, "add", "-A") // the root repo gets the changed config
+	s.pit(root, "commit", "-m", "Mixed")
+
+	// pit asks about b and the root repo only; without an answer, a isn't pushed either
+	out, err := s.pitInput(root, "", nil, "push")
+	if err == nil {
+		t.Fatalf("push without answers succeeded:\n%s", out)
+	}
+	contains(t, out, "pushing a without asking", "(1/2) Push b:", "no answer on stdin")
+	lacks(t, out, "Push a:")
+	if remoteHead("a") != "init a" {
+		t.Error("a was pushed although the questions got no answer")
+	}
+
+	// a goes along without a question, b and the root repo as answered
+	out, err = s.pitInput(root, "n\ny\n", nil, "push")
+	if err != nil {
+		t.Fatalf("push: %v\n%s", err, out)
+	}
+	contains(t, out, "(1/2) Push b:", "(2/2) Push (pit root):", block("a", "To file://"), "pushed 2 repos")
+	if remoteHead("a") != "Mixed" || remoteHead("b") != "init b" || remoteHead("forge") != "Mixed" {
+		t.Error("expected a and the root repo to be pushed, not b")
+	}
+	s.git(s.path("forge/nested/b"), "push", "-q")
+
+	// when only repos without questions have something to push, pit asks nothing
+	s.write(root, "a/y.txt", "y\n")
+	s.pit(root, "add", "a")
+	s.pit(root, "commit", "-m", "Quiet")
+	out = s.pit(root, "push")
+	contains(t, out, "pushed 1 repo")
+	lacks(t, out, "Push a:", "without asking")
+	if remoteHead("a") != "Quiet" {
+		t.Error("a wasn't pushed")
+	}
+
+	// -i asks about every repo
+	s.write(root, "a/z.txt", "z\n")
+	s.pit(root, "add", "a")
+	s.pit(root, "commit", "-m", "Asked")
+	contains(t, s.pitFails(root, "push", "-i"), "(1/1) Push a:", "no answer on stdin")
 }

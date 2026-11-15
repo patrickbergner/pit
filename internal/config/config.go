@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -28,12 +29,25 @@ type Config struct {
 }
 
 type Settings struct {
-	DefaultBranch string `json:"defaultBranch"` // default "main"
-	ConfirmPush   *bool  `json:"confirmPush"`   // default true; read with AskBeforePush
+	DefaultBranch     string          `json:"defaultBranch"`     // default "main"
+	ConfirmPush       *bool           `json:"confirmPush"`       // default true; read with AskBeforePush
+	ConfirmPushGroups map[string]bool `json:"confirmPushGroups"` // overrides ConfirmPush for the externals in these groups
 }
 
-// AskBeforePush reports whether pit push asks repo by repo before pushing (settings.confirmPush, default true).
-func (s Settings) AskBeforePush() bool { return s.ConfirmPush == nil || *s.ConfirmPush }
+// AskBeforePush reports whether pit push asks before pushing a repo in the given groups (none for the root repo): as confirmPushGroups says
+// for its groups, asking if they disagree, otherwise as confirmPush says (default true).
+func (s Settings) AskBeforePush(groups []string) bool {
+	overridden := false
+	for _, g := range groups {
+		if ask, ok := s.ConfirmPushGroups[g]; ok {
+			if ask {
+				return true
+			}
+			overridden = true
+		}
+	}
+	return !overridden && (s.ConfirmPush == nil || *s.ConfirmPush)
+}
 
 type External struct {
 	Name   string   `json:"-"`
@@ -161,6 +175,16 @@ func (c *Config) validate() error {
 			if a.Name != b.Name && strings.HasPrefix(strings.ToLower(b.Path), strings.ToLower(a.Path)+"/") {
 				return fmt.Errorf("external %q (%s) lies inside external %q (%s)", b.Name, b.Path, a.Name, a.Path)
 			}
+		}
+	}
+	groups := c.Groups()
+	for _, g := range slices.Sorted(maps.Keys(c.Settings.ConfirmPushGroups)) {
+		if !slices.Contains(groups, g) {
+			known := "no external has groups"
+			if len(groups) > 0 {
+				known = "groups: " + strings.Join(groups, ", ")
+			}
+			return fmt.Errorf("settings.confirmPushGroups: no external is in group %q (%s)", g, known)
 		}
 	}
 	return nil

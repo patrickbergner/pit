@@ -95,3 +95,19 @@ func TestGroupLog(t *testing.T) {
 		t.Errorf("entry in workspace order c, b, a = %q", got)
 	}
 }
+
+func TestColorOptions(t *testing.T) {
+	rest, color, err := colorOptions([]string{"--no-color", "status", "--color=always", "-r", "a", "--", "--no-color"})
+	if err != nil || color != "always" || !slices.Equal(rest, []string{"status", "-r", "a", "--", "--no-color"}) {
+		t.Errorf("colorOptions = %q, %q, %v", rest, color, err)
+	}
+	if _, color, _ := colorOptions([]string{"diff", "--color"}); color != "always" {
+		t.Errorf("--color = %q", color)
+	}
+	if _, color, _ := colorOptions([]string{"diff"}); color != "" {
+		t.Errorf("no option = %q", color)
+	}
+	if _, _, err := colorOptions([]string{"--color=sometimes"}); err == nil {
+		t.Error("--color=sometimes accepted")
+	}
+}

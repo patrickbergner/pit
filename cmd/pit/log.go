@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -75,7 +74,7 @@ func cmdLog(w *workspace.Workspace, args []string) error {
 	failed := false
 	for i, res := range results {
 		if res.err != nil {
-			fmt.Fprintf(os.Stderr, "pit: %s: %s\n", targets[i].Repo.Name, res.err)
+			ui.Error("%s: %s", targets[i].Repo.Label(), res.err)
 			failed = true
 			continue
 		}
@@ -187,7 +186,7 @@ func (e *logEntry) has(r *workspace.Repo) bool {
 func (e logEntry) repoList() string {
 	parts := make([]string, len(e.commits))
 	for i, c := range e.commits {
-		parts[i] = c.repo.Name + " " + c.short
+		parts[i] = c.repo.Label() + " " + c.short
 	}
 	return strings.Join(parts, ", ")
 }
@@ -195,10 +194,10 @@ func (e logEntry) repoList() string {
 func printEntry(e logEntry, oneline bool) {
 	c := e.commits[0]
 	if oneline {
-		fmt.Printf("%s  %s  [%s]\n", c.committed.Format("2006-01-02 15:04"), c.subjectLine, e.repoList())
+		fmt.Printf("%s  %s  %s\n", c.committed.Format("2006-01-02 15:04"), c.subjectLine, ui.Yellow("["+e.repoList()+"]"))
 		return
 	}
-	fmt.Println(ui.Bold("commit " + e.repoList()))
+	fmt.Println(ui.Yellow("commit " + e.repoList()))
 	fmt.Printf("Author: %s <%s>\n", c.author, c.email)
 	fmt.Printf("Date:   %s\n\n", c.authored.Format("Mon Jan 2 15:04:05 2006 -0700"))
 	for _, l := range strings.Split(c.message, "\n") {

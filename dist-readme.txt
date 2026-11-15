@@ -29,8 +29,8 @@ Quick start:
                                        pit push
 
 If the directory holding pit-externals.json is a git repo itself, it is
-included as the repo "." and pit sync keeps the externals out of it via
-its .gitignore.
+included as the root repo, "(pit root)" in output and "." with -r, and pit
+sync keeps the externals out of it via its .gitignore.
 
 Commands:
   sync                        Clone missing externals, update .gitignore

@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -13,22 +12,30 @@ import (
 	"github.com/patrickbergner/pit/internal/workspace"
 )
 
+// header starts the block of r's output; ui.End closes it.
+func header(r *workspace.Repo) { ui.Header(r.Label(), r.Path) }
+
 // sequence runs git in each target one after the other, attached to the terminal. A failing repo doesn't stop the others; the failures are
-// summed up at the end. With headers, each repo's output is introduced by its name.
-func sequence(cmd string, targets []workspace.Target, headers bool, argsFor func(workspace.Target) []string) error {
+// summed up at the end. With blocks, each repo's output comes in a block of its own; without, as for commands that are usually silent, pit
+// names the repos that failed.
+func sequence(cmd string, targets []workspace.Target, blocks bool, argsFor func(workspace.Target) []string) error {
 	var failed []string
 	for _, t := range targets {
 		if err := stopped(); err != nil {
 			return err
 		}
-		if headers {
-			ui.Header(t.Repo.Name, t.Repo.Path)
+		if blocks {
+			header(t.Repo)
 		}
-		if err := git.Pass(t.Repo.Dir, argsFor(t)...); err != nil {
-			if !headers {
-				fmt.Fprintf(os.Stderr, "pit: %s: git %s failed\n", t.Repo.Name, cmd)
+		err := git.Pass(t.Repo.Dir, argsFor(t)...)
+		if blocks {
+			ui.End()
+		}
+		if err != nil {
+			if !blocks {
+				ui.Error("%s: git %s failed", t.Repo.Label(), cmd)
 			}
-			failed = append(failed, t.Repo.Name)
+			failed = append(failed, t.Repo.Label())
 		}
 	}
 	if len(failed) > 0 {
@@ -37,14 +44,21 @@ func sequence(cmd string, targets []workspace.Target, headers bool, argsFor func
 	return nil
 }
 
+// hasOpt reports whether one of the options is among opts.
+func hasOpt(opts []string, options ...string) bool {
+	return slices.ContainsFunc(opts, func(o string) bool { return slices.Contains(options, o) })
+}
+
+// interactive reports whether git add or restore asks hunk by hunk. Then each repo gets a block, so that it is clear which repo git asks
+// about; otherwise these commands are silent.
+func interactive(opts []string) bool { return hasOpt(opts, "-p", "--patch", "-i", "--interactive") }
+
 func cmdAdd(w *workspace.Workspace, args []string) error {
 	p, err := parseArgs("add", args, spec{passthrough: true})
 	if err != nil {
 		return err
 	}
-	if len(p.paths) == 0 && !slices.ContainsFunc(p.opts, func(o string) bool {
-		return o == "-A" || o == "--all" || o == "-u" || o == "--update" || o == "-p" || o == "--patch" || o == "-i" || o == "--interactive"
-	}) {
+	if len(p.paths) == 0 && !hasOpt(p.opts, "-A", "--all", "-u", "--update") && !interactive(p.opts) {
 		return errors.New("add: nothing specified, nothing added (give paths, or -A for everything)")
 	}
 	targets, err := p.targets(w)
@@ -55,7 +69,7 @@ func cmdAdd(w *workspace.Workspace, args []string) error {
 	if w.RootRepo != nil && !w.IgnoreUpToDate() && slices.ContainsFunc(targets, func(t workspace.Target) bool { return t.Repo.IsRoot() }) {
 		return errors.New("add: .gitignore doesn't list the current externals, so the root repo would pick up their clones; run pit sync first")
 	}
-	return sequence("add", targets, false, func(t workspace.Target) []string {
+	return sequence("add", targets, interactive(p.opts), func(t workspace.Target) []string {
 		return pathspecArgs(append([]string{"add"}, p.opts...), t)
 	})
 }
@@ -72,7 +86,7 @@ func cmdRestore(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
-	return sequence("restore", targets, false, func(t workspace.Target) []string {
+	return sequence("restore", targets, interactive(p.opts), func(t workspace.Target) []string {
 		return pathspecArgs(append([]string{"restore"}, p.opts...), t)
 	})
 }
@@ -102,7 +116,7 @@ func cmdDiff(w *workspace.Workspace, args []string) error {
 		case errors.As(err, &exit) && exit.ExitCode() == 1: // --exit-code / --quiet: there are differences
 			differs = true
 		default:
-			failed = append(failed, t.Repo.Name)
+			failed = append(failed, t.Repo.Label())
 		}
 	}
 	if len(failed) > 0 {

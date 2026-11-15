@@ -55,11 +55,29 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// command builds git args run in dir ("" for the current directory) with env added to ours.
-func command(dir string, env []string, args []string) (*exec.Cmd, error) {
+// colorArgs make git color what pit shows of its output like pit colors its own, if that was decided with --color, --no-color or NO_COLOR.
+var colorArgs []string
+
+// SetColor makes git color its output that pit shows always or never, by mode "always" or "never"; with any other mode, git decides
+// itself.
+func SetColor(mode string) {
+	switch mode {
+	case "always", "never":
+		colorArgs = []string{"-c", "color.ui=" + mode}
+	default:
+		colorArgs = nil
+	}
+}
+
+// command builds git args run in dir ("" for the current directory) with env added to ours. shown is for commands whose output pit shows,
+// which follow pit's coloring.
+func command(dir string, env []string, args []string, shown bool) (*exec.Cmd, error) {
 	bin, err := Path()
 	if err != nil {
 		return nil, err
+	}
+	if shown {
+		args = append(append([]string(nil), colorArgs...), args...)
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
@@ -71,7 +89,7 @@ func command(dir string, env []string, args []string) (*exec.Cmd, error) {
 
 // Raw runs git in dir with stdin (may be nil) and returns its stdout.
 func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd, err := command(dir, nil, args)
+	cmd, err := command(dir, nil, args, false)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
@@ -104,7 +122,7 @@ func OK(dir string, args ...string) bool {
 // Combined runs git in dir without a terminal: no stdin, interactive credential prompts disabled, stdout and stderr captured together. It
 // is for commands that run in parallel, whose output is printed afterwards.
 func Combined(dir string, args ...string) ([]byte, error) {
-	cmd, err := command(dir, []string{"GIT_TERMINAL_PROMPT=0"}, args)
+	cmd, err := command(dir, []string{"GIT_TERMINAL_PROMPT=0"}, args, true)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
@@ -118,7 +136,7 @@ func Combined(dir string, args ...string) ([]byte, error) {
 
 // Pass runs git in dir attached to the terminal: stdin, stdout and stderr are pit's own.
 func Pass(dir string, args ...string) error {
-	cmd, err := command(dir, nil, args)
+	cmd, err := command(dir, nil, args, true)
 	if err != nil {
 		return err
 	}
