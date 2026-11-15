@@ -35,10 +35,11 @@ func cmdSync(w *workspace.Workspace, args []string) error {
 			}
 		}
 	}
-	// an external's parent first, as the external is cloned into the parent's work tree
-	exts = slices.Clone(exts)
-	slices.SortStableFunc(exts, func(a, b *workspace.Repo) int { return depth(a) - depth(b) })
+	exts = parentsFirst(exts)
 
+	if dir := w.EnclosingRepo(); dir != "" {
+		ui.Warn("%s lies inside the git repo %s without being a repo itself; nothing keeps the externals' clones out of that repo", w.Root, dir)
+	}
 	var failed []string
 	shown, quiet := 0, 0
 	// The ignore blocks of the externals not selected come first, as the selected ones may lie inside them.
@@ -92,13 +93,39 @@ func cmdSync(w *workspace.Workspace, args []string) error {
 	return nil
 }
 
-// depth is the number of externals the external r lies inside.
-func depth(r *workspace.Repo) int {
-	d := 0
-	for p := r.Parent; p != nil; p = p.Parent {
-		d++
+// parentsFirst orders the externals for sync: in config order, except that an external listed before an external it lies inside waits
+// until right after that one, as it is cloned into that one's work tree.
+func parentsFirst(exts []*workspace.Repo) []*workspace.Repo {
+	done := map[*workspace.Repo]bool{}
+	ready := func(r *workspace.Repo) bool {
+		for p := r.Parent; p != nil; p = p.Parent {
+			if !done[p] && slices.Contains(exts, p) {
+				return false
+			}
+		}
+		return true
 	}
-	return d
+	var order, waiting []*workspace.Repo
+	for _, r := range exts {
+		if !ready(r) {
+			waiting = append(waiting, r)
+			continue
+		}
+		order = append(order, r)
+		done[r] = true
+		// the waiting externals r has made ready, in config order, and in turn those they make ready
+		for i := 0; i < len(waiting); {
+			if w := waiting[i]; ready(w) {
+				order = append(order, w)
+				done[w] = true
+				waiting = slices.Delete(waiting, i, i+1)
+				i = 0
+			} else {
+				i++
+			}
+		}
+	}
+	return order
 }
 
 // originProblem tells what is wrong with the origin of a cloned external, if anything.
@@ -140,12 +167,13 @@ func clone(w *workspace.Workspace, r *workspace.Repo) error {
 		return fmt.Errorf("%s exists and is not empty, but is not a git repo; pit doesn't touch it", r.Path)
 	}
 
-	refs, err := git.Output("", "ls-remote", "--heads", r.Ext.URL)
+	// in the root, as the clone: a relative URL means the same for both
+	refs, err := git.Output(w.Root, "ls-remote", "--heads", "--", r.Ext.URL)
 	if err != nil {
 		return err
 	}
 	if refs == "" { // empty repo: clone it and start the configured branch
-		if err := git.Pass(w.Root, "clone", r.Ext.URL, r.Path); err != nil {
+		if err := git.Pass(w.Root, "clone", "--", r.Ext.URL, r.Path); err != nil {
 			return err
 		}
 		return gitDo(r.Dir, "symbolic-ref", "HEAD", "refs/heads/"+r.Ext.Branch)
@@ -153,7 +181,7 @@ func clone(w *workspace.Workspace, r *workspace.Repo) error {
 	if !slices.ContainsFunc(strings.Split(refs, "\n"), func(l string) bool { return strings.HasSuffix(l, "\trefs/heads/"+r.Ext.Branch) }) {
 		return fmt.Errorf("%s has no branch %q", r.Ext.URL, r.Ext.Branch)
 	}
-	return git.Pass(w.Root, "clone", "--branch", r.Ext.Branch, r.Ext.URL, r.Path)
+	return git.Pass(w.Root, "clone", "--branch", r.Ext.Branch, "--", r.Ext.URL, r.Path)
 }
 
 // gitDo runs a git command whose output doesn't matter.

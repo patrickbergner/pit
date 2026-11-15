@@ -89,6 +89,10 @@ func TestParseRejects(t *testing.T) {
 	for _, tc := range []struct{ json, want string }{
 		{`{"externals": {"x": {"url": "u", "path": "x", "repoPath": "x"}}}`, "unknown field"},
 		{`{"setting": {}}`, "unknown field"},
+		// git would read these as options
+		{`{"externals": {"x": {"url": "--upload-pack=evil", "path": "x"}}}`, "must not start with '-'"},
+		{`{"externals": {"x": {"url": "u", "path": "x", "branch": "-b"}}}`, "must not start with '-'"},
+		{`{"externals": {"x": {"url": "u", "path": "lib/-x"}}}`, "segments starting with '-'"},
 		{`{"externals": []}`, "must be an object"},
 		{`{} {}`, "unexpected content"},
 		{`{"externals": {"x": {"url": "u"}}}`, `needs "url" and "path"`},

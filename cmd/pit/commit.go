@@ -105,25 +105,30 @@ func cmdCommit(w *workspace.Workspace, args []string) error {
 	for _, st := range plan.Steps {
 		amending[st.Repo] = true
 	}
+	// Pre-flight: everything that would foreseeably fail, for all repos at once
+	var problems []string
 	var unstaged []string
 	for _, r := range repos {
 		s := statuses[r.Name]
-		if s.err == nil && !amending[r.Name] && hasWork(s, plan.All) {
+		switch {
+		case amending[r.Name]: // checked with the plan's steps below
+		case s.err != nil:
+			// whether it has something to commit is unknown, so it can't be left out silently
+			problems = append(problems, fmt.Sprintf("%s: %s", r.Label(), s.err))
+		case hasWork(s, plan.All):
 			plan.Steps = append(plan.Steps, commitStep{Repo: r.Name})
-		} else if s.err == nil && !s.Clean() && !amending[r.Name] && !s.Conflicts() {
+		case !s.Clean() && !s.Conflicts():
 			unstaged = append(unstaged, r.Label())
 		}
 	}
 	plan.Steps = inWorkspaceOrder(w, plan.Steps)
-	if len(plan.Steps) == 0 {
+	if len(plan.Steps) == 0 && len(problems) == 0 {
 		if len(unstaged) > 0 {
 			return fmt.Errorf("nothing staged to commit in any repo (changes in %s; use pit add or pit commit -a)", strings.Join(unstaged, ", "))
 		}
 		return errors.New("nothing to commit, all repos clean")
 	}
 
-	// Pre-flight: everything that would foreseeably fail, for all repos at once
-	var problems []string
 	for _, st := range plan.Steps {
 		r, _ := byName(w, st.Repo)
 		s, ok := statuses[st.Repo]
@@ -295,7 +300,8 @@ func commitMessage(w *workspace.Workspace, p *parsed, plan *commitPlan, statuses
 	}
 	args := []string{"stripspace"}
 	if edit {
-		args = append(args, "--strip-comments")
+		// the template's comments start with '#', whatever core.commentChar says
+		args = []string{"-c", "core.commentChar=#", "stripspace", "--strip-comments"}
 	}
 	clean, err := git.Input(w.Root, msg, args...)
 	if err != nil {
@@ -375,6 +381,13 @@ func runPlan(w *workspace.Workspace, plan *commitPlan) error {
 		if st.Hash != "-" {
 			last.Commits = append(last.Commits, commitStep{Repo: st.Repo, Hash: st.Hash})
 		}
+	}
+	if len(last.Commits) == 0 {
+		// every repo was skipped: the last pit commit stays the one to amend
+		if err := w.RemoveState(inProgressFile); err != nil {
+			return err
+		}
+		return errors.New("commit: nothing was committed")
 	}
 	if err := w.WriteState(lastCommitFile, &last); err != nil {
 		return err

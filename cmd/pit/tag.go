@@ -53,6 +53,10 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
+	// everything that can stop the push comes before the tags are made
+	if err := pushOptions(p); err != nil {
+		return err
+	}
 	// a tag of that name on a remote would keep the new one from being pushed
 	type remoteTag struct {
 		remote string
@@ -87,6 +91,10 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 		for _, pr := range problems {
 			ui.Error("%s", pr)
 		}
+		return errors.New("pushtag: nothing was tagged")
+	}
+	if err := fetchAll(repos, nil, true); err != nil {
+		ui.Error("%s", err)
 		return errors.New("pushtag: nothing was tagged")
 	}
 	if err := createTags("pushtag", repos, name); err != nil {

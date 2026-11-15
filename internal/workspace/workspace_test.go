@@ -193,6 +193,20 @@ func TestIgnoreBlock(t *testing.T) {
 		t.Errorf("ParseIgnoreBlock = %v, %v", got, found)
 	}
 
+	// a block that lost its end marker ends before the first line that isn't an entry; what follows is kept
+	cut := "*.log\n" + IgnoreBegin + "\n/.pit/\n/a/\ntmp/\n\nbuild/\n"
+	if got, found := ParseIgnoreBlock(cut); !found || !slices.Equal(got, []string{"/.pit/", "/a/"}) {
+		t.Errorf("ParseIgnoreBlock without end marker = %v, %v", got, found)
+	}
+	if got, want := UpdateIgnoreBlock(cut, []string{"/.pit/", "/x/"}), "*.log\n"+IgnoreBegin+"\n/.pit/\n/x/\n"+IgnoreEnd+"\ntmp/\n\nbuild/\n"; got != want {
+		t.Errorf("without end marker:\n%q\nwant\n%q", got, want)
+	}
+	// lines someone put into the block stay too, after it
+	edited := IgnoreBegin + "\n/a/\nmine/\n" + IgnoreEnd + "\nlast\n"
+	if got, want := UpdateIgnoreBlock(edited, []string{"/a/"}), IgnoreBegin+"\n/a/\n"+IgnoreEnd+"\nmine/\nlast\n"; got != want {
+		t.Errorf("edited block:\n%q\nwant\n%q", got, want)
+	}
+
 	// CRLF files stay CRLF
 	crlf := UpdateIgnoreBlock("*.log\r\n", []string{"/a/"})
 	if want := "*.log\r\n\r\n" + IgnoreBegin + "\r\n/a/\r\n" + IgnoreEnd + "\r\n"; crlf != want {

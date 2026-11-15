@@ -17,7 +17,7 @@ type logCommit struct {
 	repo        *workspace.Repo
 	short       string
 	committed   time.Time
-	authored    time.Time
+	date        string // the author date as git log shows it
 	author      string
 	email       string
 	message     string
@@ -94,7 +94,7 @@ func readLog(r *workspace.Repo, count int, pathspecs []string) ([]logCommit, err
 	if !git.OK(r.Dir, "rev-parse", "-q", "--verify", "HEAD") {
 		return nil, nil // no commits yet
 	}
-	args := []string{"log", "-z", "-n", strconv.Itoa(count), "--format=%h%x1f%ct%x1f%at%x1f%an%x1f%ae%x1f%B"}
+	args := []string{"log", "-z", "-n", strconv.Itoa(count), "--format=%h%x1f%ct%x1f%ad%x1f%an%x1f%ae%x1f%B"}
 	if len(pathspecs) > 0 {
 		args = append(append(args, "--"), pathspecs...)
 	}
@@ -109,10 +109,9 @@ func readLog(r *workspace.Repo, count int, pathspecs []string) ([]logCommit, err
 			continue
 		}
 		ct, _ := strconv.ParseInt(f[1], 10, 64)
-		at, _ := strconv.ParseInt(f[2], 10, 64)
 		msg := strings.TrimRight(f[5], "\n")
 		subject, _, _ := strings.Cut(msg, "\n")
-		commits = append(commits, logCommit{r, f[0], time.Unix(ct, 0), time.Unix(at, 0), f[3], f[4], msg, subject})
+		commits = append(commits, logCommit{r, f[0], time.Unix(ct, 0), f[2], f[3], f[4], msg, subject})
 	}
 	return commits, nil
 }
@@ -157,12 +156,13 @@ func groupCommits(commits []logCommit, count int) []logEntry {
 	var entries []logEntry
 next:
 	for _, c := range commits {
+		// the entries started last are the closest in time
 		for i := len(entries) - 1; i >= 0; i-- {
 			e := &entries[i]
 			if e.commits[len(e.commits)-1].committed.Sub(c.committed) > groupWindow {
-				break
+				continue
 			}
-			if e.commits[0].email == c.email && e.commits[0].message == c.message && !e.has(c.repo) {
+			if e.commits[0].email == c.email && e.commits[0].message == c.message && !e.has(c.repo) && !e.betterMatch(c, commits) {
 				e.commits = append(e.commits, c)
 				continue next
 			}
@@ -172,6 +172,21 @@ next:
 		}
 	}
 	return entries
+}
+
+// betterMatch reports whether c, which could join the entry, rather belongs with another commit: one with its author and message from a
+// repo of the entry that is closer to c in time than the entry's commit of that repo. That is how the same message used again shortly
+// afterwards in one repo ("WIP") doesn't take the place of the commit that was made together with c.
+func (e *logEntry) betterMatch(c logCommit, commits []logCommit) bool {
+	for _, m := range e.commits {
+		for _, d := range commits {
+			if d.repo == m.repo && d.email == c.email && d.message == c.message &&
+				d.committed.Sub(c.committed).Abs() < m.committed.Sub(c.committed).Abs() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *logEntry) has(r *workspace.Repo) bool {
@@ -199,7 +214,7 @@ func printEntry(e logEntry, oneline bool) {
 	}
 	fmt.Println(ui.Yellow("commit " + e.repoList()))
 	fmt.Printf("Author: %s <%s>\n", c.author, c.email)
-	fmt.Printf("Date:   %s\n\n", c.authored.Format("Mon Jan 2 15:04:05 2006 -0700"))
+	fmt.Printf("Date:   %s\n\n", c.date)
 	for _, l := range strings.Split(c.message, "\n") {
 		fmt.Println(strings.TrimRight("    "+l, " "))
 	}

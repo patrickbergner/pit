@@ -100,6 +100,12 @@ func ignorePattern(p string) string {
 	return b.String()
 }
 
+// isIgnoreEntry reports whether a line looks like one ignorePattern wrote. The managed block holds nothing else, so any other line ends it,
+// even where its end marker is missing: what someone put below a damaged block is theirs, not pit's to rewrite.
+func isIgnoreEntry(line string) bool {
+	return len(line) >= 2 && line[0] == '/' && line[len(line)-1] == '/'
+}
+
 // ParseIgnoreBlock returns the entries of the managed block in an ignore file.
 func ParseIgnoreBlock(content string) (entries []string, found bool) {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
@@ -108,10 +114,10 @@ func ParseIgnoreBlock(content string) (entries []string, found bool) {
 		switch {
 		case l == IgnoreBegin:
 			in, found = true, true
-		case l == IgnoreEnd:
-			in = false
-		case in && strings.TrimSpace(l) != "":
+		case in && isIgnoreEntry(l):
 			entries = append(entries, l)
+		default:
+			in = false
 		}
 	}
 	return entries, found
@@ -119,7 +125,8 @@ func ParseIgnoreBlock(content string) (entries []string, found bool) {
 
 // UpdateIgnoreBlock returns content with the managed block replaced by entries, or appended if there is none. Without entries, the block
 // is removed instead, together with the empty line that set it apart if it was at the end. The rest of the file and its line endings are
-// kept.
+// kept. The block is the begin marker, the entries after it and the end marker; without the end marker, it ends before the first line
+// that isn't an entry, and that line and the ones after it are kept.
 func UpdateIgnoreBlock(content string, entries []string) string {
 	nl := "\n"
 	if strings.Contains(content, "\r\n") {
@@ -135,17 +142,24 @@ func UpdateIgnoreBlock(content string, entries []string) string {
 	replaced, in := false, false
 	for _, l := range lines {
 		bare := strings.TrimRight(l, "\r\n")
-		switch {
-		case !in && bare == IgnoreBegin:
+		if in {
+			if bare == IgnoreEnd {
+				in = false
+				continue
+			}
+			if isIgnoreEntry(bare) {
+				continue
+			}
+			in = false // the end marker is missing
+		}
+		switch bare {
+		case IgnoreBegin:
 			in = true
 			if !replaced {
 				out.WriteString(block)
 				replaced = true
 			}
-		case in:
-			if bare == IgnoreEnd {
-				in = false
-			}
+		case IgnoreEnd: // left over from a block that was cut short
 		default:
 			out.WriteString(l)
 		}

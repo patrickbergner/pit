@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/patrickbergner/pit/internal/git"
 	"github.com/patrickbergner/pit/internal/ui"
@@ -17,6 +20,19 @@ import (
 
 // version is set from the VERSION file at build time (see build.sh).
 var version = "dev"
+
+// pitVersion returns the version: as built in, or else the module's version that go install fetched. A build from a working copy stays
+// "dev": what Go derives for it from the repo's tags and state says little.
+func pitVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if version != "dev" || !ok || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return version
+	}
+	if slices.ContainsFunc(info.Settings, func(s debug.BuildSetting) bool { return strings.HasPrefix(s.Key, "vcs") }) {
+		return version
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(info.Main.Version, "v"), "+incompatible")
+}
 
 const usage = `Usage: pit <command> [-r <repo>]... [-g <group>]... [options] [<path>...]
 
@@ -84,15 +100,16 @@ pit pull --rebase, pit push --force-with-lease.
 // errSilent makes pit exit with status 1 without printing anything more.
 var errSilent = errors.New("")
 
-// interrupted is set on Ctrl-C. The git process running at that moment gets the signal too and stops; pit then stops before the next repo.
+// interrupted is set on Ctrl-C, and when pit is asked to end or its terminal closes. The git process running at that moment gets the signal
+// too and stops; pit then stops before the next repo and gives its lock back.
 var interrupted atomic.Bool
 
-// interruptCh is closed on the first Ctrl-C, ending a pending question.
+// interruptCh is closed on the first such signal, ending a pending question.
 var interruptCh = make(chan struct{})
 
 func main() {
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		for range sig {
 			if !interrupted.Swap(true) {
@@ -149,7 +166,11 @@ func run(args []string) int {
 		fmt.Print(usage)
 		return 0
 	case "version", "--version":
-		fmt.Println("pit", version)
+		fmt.Println("pit", pitVersion())
+		return 0
+	}
+	if name != "each" && wantsHelp(args) { // each's arguments are git's
+		fmt.Print(usage)
 		return 0
 	}
 	c, ok := commands[name]
@@ -165,6 +186,15 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// wantsHelp reports whether -h or --help is among a command's options. pit has one help text for all commands; passed on to git, the
+// option would open git's manual once per repo.
+func wantsHelp(args []string) bool {
+	if i := slices.Index(args, "--"); i >= 0 {
+		args = args[:i]
+	}
+	return slices.Contains(args, "-h") || slices.Contains(args, "--help")
 }
 
 // colorOptions takes --color[=<when>] and --no-color out of args, wherever they come before a "--": before the command or among its

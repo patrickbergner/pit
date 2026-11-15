@@ -124,19 +124,21 @@ func (st pushStep) what() string {
 	return strings.Join(parts, ", ")
 }
 
-// args returns the arguments of the step's git push. A branch without tags is pushed as git push would; with tags, branch and tags go in
-// one atomic push, so that a tag never gets to the remote without the commits it is on.
+// args returns the arguments of the step's git push. The branch goes to its upstream branch by name, as the plan said, whatever
+// push.default and the like would make of a plain git push. With tags, branch and tags go in one atomic push, so that a tag never gets
+// to the remote without the commits it is on.
 func (st pushStep) args(opts []string) []string {
 	args := []string{"push"}
+	if st.pushesBranch() && len(st.tags) > 0 {
+		args = append(args, "--atomic")
+	}
 	switch {
-	case len(st.tags) == 0 && st.setUp:
-		args = append(args, "-u", "origin", st.branch)
-	case len(st.tags) == 0:
-		// the branch to its upstream
 	case st.setUp:
-		args = append(args, "--atomic", "-u", "origin", st.branch)
+		args = append(args, "-u", "origin", st.branch)
+	case st.pushesBranch() && st.remote != "" && st.mergeRef != "":
+		args = append(args, st.remote, "refs/heads/"+st.branch+":"+st.mergeRef)
 	case st.pushesBranch():
-		args = append(args, "--atomic", st.remote, "refs/heads/"+st.branch+":"+st.mergeRef)
+		// the upstream is a branch of the repo itself: as git push does it
 	default:
 		args = append(args, st.remote)
 	}
@@ -167,20 +169,32 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := pushOptions(p); err != nil {
+		return err
+	}
+	if err := fetchAll(repos, nil, true); err != nil {
+		return err
+	}
 	_, err = pushRepos(w, p, repos)
 	return err
 }
 
-// pushRepos is pit push in the repos: the plan, the questions, the pushes. It returns the steps pushed.
-func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pushStep, error) {
+// pushOptions checks the options of pit push.
+func pushOptions(p *parsed) error {
 	if p.on("interactive") && p.on("yes") {
-		return nil, errors.New("push: -i (ask) and -y (don't ask) exclude each other")
+		return errors.New("push: -i (ask) and -y (don't ask) exclude each other")
 	}
 	for _, o := range []string{"--tags", "--follow-tags"} {
 		if hasOpt(p.opts, o) {
-			return nil, fmt.Errorf("push: pit pushes the new tags on each branch it pushes by itself; leave out %s", o)
+			return fmt.Errorf("push: pit pushes the new tags on each branch it pushes by itself; leave out %s", o)
 		}
 	}
+	return nil
+}
+
+// pushRepos is pit push in the repos, once the options are checked (pushOptions) and the repos fetched: the plan, the questions, the
+// pushes. It returns the steps pushed.
+func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pushStep, error) {
 	// asks reports whether pit asks before pushing r: -y and -i decide for all repos, otherwise the settings for r's groups
 	asks := func(r *workspace.Repo) bool {
 		switch {
@@ -196,9 +210,6 @@ func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pu
 	force := slices.ContainsFunc(p.opts, func(o string) bool {
 		return o == "-f" || o == "--force" || strings.HasPrefix(o, "--force-with-lease") || strings.HasPrefix(o, "--force-if-includes")
 	})
-	if err := fetchAll(repos, nil, true); err != nil {
-		return nil, err
-	}
 	statuses := readStatuses(targetsOf(repos))
 	tags := findNewTags(statuses)
 
@@ -225,7 +236,7 @@ func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pu
 			if s.Ahead == 0 && len(nt.onBranch) == 0 {
 				continue
 			}
-			st := pushStep{repo: r, branch: s.Branch, remote: nt.remote, tags: nt.onBranch}
+			st := pushStep{repo: r, branch: s.Branch, remote: tagRemote(s), tags: nt.onBranch}
 			if s.Ahead > 0 {
 				st.dest, st.commits = s.Upstream, logLines(r, "@{upstream}..HEAD")
 				st.mergeRef, _ = git.Output(r.Dir, "config", "--get", "branch."+s.Branch+".merge")
@@ -242,6 +253,17 @@ func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pu
 		}
 		if s.Detached {
 			ui.Note("%s: skipped, HEAD is detached", r.Label())
+			continue
+		}
+		if s.UpstreamGone {
+			// The branch was published and then deleted on the remote, typically once it was merged. Pushing it would bring it back.
+			commits := logLines(r, "HEAD", "--not", "--remotes")
+			if len(commits) == 0 {
+				ui.Note("%s: skipped, the upstream %s of %s is gone and there are no new commits", r.Label(), s.Upstream, s.Branch)
+				continue
+			}
+			steps = append(steps, pushStep{repo: r, branch: s.Branch, dest: s.Upstream, commits: commits, blocked: fmt.Sprintf(
+				"the upstream %s of %s is gone; publish the branch again with git push -u, or move its commits elsewhere", s.Upstream, s.Branch)})
 			continue
 		}
 		if !git.OK(r.Dir, "remote", "get-url", "origin") {
@@ -342,30 +364,35 @@ func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pu
 		fmt.Fprintln(os.Stderr) // the questions end, the pushes begin
 	}
 
+	// progress tells where the pushes stand when they end early: steps[:done] are pushed, steps[next:] are still to do
+	progress := func(done, next int) {
+		var pushed, rest []string
+		for _, d := range steps[:done] {
+			pushed = append(pushed, d.repo.Label())
+		}
+		for _, d := range steps[next:] {
+			rest = append(rest, d.repo.Label())
+		}
+		if len(pushed) > 0 {
+			ui.Note("pushed: %s", strings.Join(pushed, ", "))
+		}
+		if len(rest) > 0 {
+			ui.Note("not pushed yet: %s", strings.Join(rest, ", "))
+		}
+		if len(unpushable) > 0 {
+			ui.Note("can't push: %s", strings.Join(unpushable, ", "))
+		}
+	}
 	for i, st := range steps {
 		if err := stopped(); err != nil {
+			progress(i, i)
 			return steps[:i], err
 		}
 		header(st.repo)
 		err := git.Pass(st.repo.Dir, st.args(p.opts)...)
 		ui.End()
 		if err != nil {
-			var pushed, rest []string
-			for _, d := range steps[:i] {
-				pushed = append(pushed, d.repo.Label())
-			}
-			for _, d := range steps[i+1:] {
-				rest = append(rest, d.repo.Label())
-			}
-			if len(pushed) > 0 {
-				ui.Note("pushed: %s", strings.Join(pushed, ", "))
-			}
-			if len(rest) > 0 {
-				ui.Note("not pushed yet: %s", strings.Join(rest, ", "))
-			}
-			if len(unpushable) > 0 {
-				ui.Note("can't push: %s", strings.Join(unpushable, ", "))
-			}
+			progress(i, i+1)
 			return steps[:i], fmt.Errorf("push failed in %s", st.repo.Label())
 		}
 	}

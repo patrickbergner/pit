@@ -92,10 +92,35 @@ func cmdRestore(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
-	return sequence("restore", targets, interactive(p.opts), func(t workspace.Target) []string {
+	// git restore fails for a pathspec that matches nothing, as a directory with externals below does in a repo that has nothing of its
+	// own in it. Such a directory is restored in the externals only.
+	var owning []workspace.Target
+	for _, t := range targets {
+		t.Pathspecs = slices.DeleteFunc(slices.Clone(t.Pathspecs), func(spec string) bool {
+			return slices.Contains(t.Shared, spec) && !hasFiles(t.Repo, spec)
+		})
+		if len(t.Pathspecs) > 0 {
+			owning = append(owning, t)
+		}
+	}
+	return sequence("restore", owning, interactive(p.opts), func(t workspace.Target) []string {
 		return pathspecArgs(append([]string{"restore"}, p.opts...), t)
 	})
 }
+
+// hasFiles reports whether the repo has files of its own in pathspec: tracked ones, or deleted ones still to restore. If that can't be
+// told, it says yes, and git reports what is wrong.
+func hasFiles(r *workspace.Repo, pathspec string) bool {
+	if tracked, err := git.Output(r.Dir, "ls-files", "--", pathspec); err != nil || tracked != "" {
+		return true
+	}
+	s, err := workspace.ReadStatus(r, []string{pathspec})
+	return err != nil || s.TrackedChanges()
+}
+
+// diffSummaries are the git diff options for output that lists files with paths relative to the repo, where a patch has headers.
+var diffSummaries = []string{"--stat", "--numstat", "--shortstat", "--dirstat", "--cumulative", "--summary", "--compact-summary",
+	"--name-only", "--name-status", "--raw"}
 
 // cmdDiff prints the diffs of all repos as one diff of the whole tree: each repo's paths are prefixed with its path below the root.
 func cmdDiff(w *workspace.Workspace, args []string) error {
@@ -107,6 +132,12 @@ func cmdDiff(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The prefixes put a repo's location into the paths of a patch only. The formats that list files instead get a block per repo, so
+	// that it is clear whose files they are.
+	blocks := slices.ContainsFunc(p.opts, func(o string) bool {
+		name, _, _ := strings.Cut(o, "=")
+		return slices.Contains(diffSummaries, name)
+	})
 	differs := false
 	var failed []string
 	for _, t := range targets {
@@ -115,7 +146,16 @@ func cmdDiff(w *workspace.Workspace, args []string) error {
 		}
 		prefix := t.Repo.RootRelative()
 		gitArgs := []string{"--no-pager", "diff", "--src-prefix=a/" + prefix, "--dst-prefix=b/" + prefix}
+		if blocks {
+			if git.OK(t.Repo.Dir, pathspecArgs(append(append(gitArgs, p.opts...), "--quiet"), t)...) {
+				continue // no differences, no block
+			}
+			header(t.Repo)
+		}
 		err := git.Pass(t.Repo.Dir, pathspecArgs(append(gitArgs, p.opts...), t)...)
+		if blocks {
+			ui.End()
+		}
 		var exit *exec.ExitError
 		switch {
 		case err == nil:

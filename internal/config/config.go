@@ -160,6 +160,13 @@ func (c *Config) validate() error {
 		if err := checkPath(e.Path); err != nil {
 			return fmt.Errorf("external %q: path %q %v", e.Name, e.Path, err)
 		}
+		// pit hands these to git, which would read a leading '-' as an option
+		if strings.HasPrefix(e.URL, "-") {
+			return fmt.Errorf("external %q: url %q must not start with '-'", e.Name, e.URL)
+		}
+		if strings.HasPrefix(e.Branch, "-") {
+			return fmt.Errorf("external %q: branch %q must not start with '-'", e.Name, e.Branch)
+		}
 		for i, g := range e.Groups {
 			if !validName.MatchString(g) {
 				return fmt.Errorf("external %q: invalid group name %q (letters, digits, '.', '_', '-'; not starting with '.' or '-')", e.Name, g)
@@ -200,6 +207,8 @@ func checkPath(p string) error {
 		switch {
 		case seg == "" || seg == "." || seg == "..":
 			return errors.New("must be a plain relative path without empty, '.' or '..' segments")
+		case strings.HasPrefix(seg, "-"):
+			return errors.New("must not have segments starting with '-'")
 		case strings.EqualFold(seg, ".git"):
 			return errors.New("must not contain a .git directory")
 		case i == 0 && strings.EqualFold(seg, StateDir):

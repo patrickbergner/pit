@@ -140,6 +140,22 @@ func Open(cwd string) (*Workspace, error) {
 	return w, nil
 }
 
+// EnclosingRepo returns the directory of the git repo that the root lies inside without being one itself; "" if there is none. pit doesn't
+// work with that repo, so nothing keeps the externals' clones out of it.
+func (w *Workspace) EnclosingRepo() string {
+	if w.RootRepo != nil {
+		return ""
+	}
+	for dir := filepath.Dir(w.Root); ; dir = filepath.Dir(dir) {
+		if isRepo(dir) {
+			return dir
+		}
+		if dir == filepath.Dir(dir) {
+			return ""
+		}
+	}
+}
+
 // Container returns the repo whose work tree holds the external r's directory: its parent external, otherwise the root repo (nil if the
 // root isn't a git repo).
 func (w *Workspace) Container(r *Repo) *Repo {
@@ -274,40 +290,46 @@ func (w *Workspace) ordered(set map[*Repo]bool) []*Repo {
 type Target struct {
 	Repo      *Repo
 	Pathspecs []string
+	// Shared are the pathspecs that are directories with externals below. The repo needn't have anything of its own in them, and git
+	// commands that insist on a pathspec matching something fail for such a directory.
+	Shared []string
 }
 
 // Route maps paths given on the command line (relative to the current directory) to the repos owning them. A path belongs to the external
 // whose path is its longest prefix, the innermost one if externals are nested, otherwise to the root repo. A directory also covers every external below it, so "pit add ." at the root
 // stages in all repos.
 func (w *Workspace) Route(paths []string) ([]Target, error) {
-	specs := map[*Repo][]string{}
+	specs, shared := map[*Repo][]string{}, map[*Repo][]string{}
 	for _, p := range paths {
 		rel, err := w.rootRel(p)
 		if err != nil {
 			return nil, err
 		}
-		covered := false
-		if owner, spec := w.owner(rel); owner != nil {
+		owner, spec := w.owner(rel)
+		if owner != nil {
 			if !owner.Cloned() {
 				return nil, fmt.Errorf("%s: %s is not cloned yet; run pit sync", p, owner.Name)
 			}
 			specs[owner] = append(specs[owner], spec)
-			covered = true
 		}
+		below := false
 		for _, r := range w.Externals {
 			if r.Cloned() && (rel == "." || hasPathPrefix(r.Path, rel)) {
 				specs[r] = append(specs[r], ".")
-				covered = true
+				below = true
 			}
 		}
-		if !covered {
+		switch {
+		case owner != nil && below:
+			shared[owner] = append(shared[owner], spec)
+		case owner == nil && !below:
 			return nil, fmt.Errorf("%s: not inside any repo of %s", p, w.Root)
 		}
 	}
 	var targets []Target
 	for _, r := range w.All() {
 		if s, ok := specs[r]; ok {
-			targets = append(targets, Target{r, s})
+			targets = append(targets, Target{r, s, shared[r]})
 		}
 	}
 	return targets, nil

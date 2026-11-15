@@ -90,6 +90,15 @@ func TestGroupLog(t *testing.T) {
 	if n := len(groupLog(merged, 2, []*workspace.Repo{a, b, c})); n != 2 {
 		t.Errorf("count 2 gave %d entries", n)
 	}
+	// a message used again in b shortly afterwards doesn't take the place of b's commit made together with a's
+	again := []logCommit{commit(b, 220, "W"), commit(a, 100, "W"), commit(b, 100, "W")}
+	got = nil
+	for _, e := range groupLog(again, 10, []*workspace.Repo{a, b, c}) {
+		got = append(got, e.repoList())
+	}
+	if want := []string{"b bW", "a aW, b bW"}; !slices.Equal(got, want) {
+		t.Errorf("groups = %q, want %q", got, want)
+	}
 	// within an entry, repos follow the workspace order, not the merge order
 	if got := groupLog(merged, 1, []*workspace.Repo{c, b, a})[0].repoList(); got != "c cX, a aX" {
 		t.Errorf("entry in workspace order c, b, a = %q", got)
@@ -120,6 +129,9 @@ func TestPushArgs(t *testing.T) {
 	}{
 		{pushStep{branch: "main", dest: "origin/main"}, []string{"push", "--force-with-lease"}},
 		{pushStep{branch: "x", dest: "origin/x", setUp: true}, []string{"push", "-u", "origin", "x", "--force-with-lease"}},
+		// the branch to its upstream branch by name, not as push.default would have it
+		{pushStep{branch: "main", dest: "up/master", remote: "up", mergeRef: "refs/heads/master"},
+			[]string{"push", "up", "refs/heads/main:refs/heads/master", "--force-with-lease"}},
 		// with tags: one atomic push, the branch to its upstream branch by name
 		{pushStep{branch: "main", dest: "up/master", remote: "up", mergeRef: "refs/heads/master", tags: []string{"v1"}},
 			[]string{"push", "--atomic", "up", "refs/heads/main:refs/heads/master", "refs/tags/v1", "--force-with-lease"}},
@@ -139,5 +151,35 @@ func TestPushArgs(t *testing.T) {
 	st = pushStep{branch: "main", remote: "origin", tags: []string{"v1", "v2"}}
 	if got := st.what(); got != "tags v1, v2 -> origin" {
 		t.Errorf("what = %q", got)
+	}
+}
+
+func TestParentsFirst(t *testing.T) {
+	names := func(rs []*workspace.Repo) []string {
+		var n []string
+		for _, r := range rs {
+			n = append(n, r.Name)
+		}
+		return n
+	}
+	a := &workspace.Repo{Name: "a"}
+	b := &workspace.Repo{Name: "b", Parent: a}
+	c := &workspace.Repo{Name: "c", Parent: b}
+	x := &workspace.Repo{Name: "x"}
+	z := &workspace.Repo{Name: "z"}
+	for _, tc := range []struct {
+		in   []*workspace.Repo
+		want []string
+	}{
+		{[]*workspace.Repo{a, b, z}, []string{"a", "b", "z"}},         // config order where it works
+		{[]*workspace.Repo{a, z, b}, []string{"a", "z", "b"}},         // nested externals aren't moved up
+		{[]*workspace.Repo{b, x, a, z}, []string{"x", "a", "b", "z"}}, // b right after a
+		{[]*workspace.Repo{c, b, x, a}, []string{"x", "a", "b", "c"}}, // deeper nesting, in turn
+		{[]*workspace.Repo{c, x, a}, []string{"x", "a", "c"}},         // b not selected: c still after a
+		{[]*workspace.Repo{c, x}, []string{"c", "x"}},                 // parents not selected: no constraint
+	} {
+		if got := names(parentsFirst(tc.in)); !slices.Equal(got, tc.want) {
+			t.Errorf("parentsFirst(%v) = %v, want %v", names(tc.in), got, tc.want)
+		}
 	}
 }

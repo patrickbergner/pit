@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -81,11 +82,37 @@ func command(dir string, env []string, args []string, shown bool) (*exec.Cmd, er
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
-	if env != nil {
-		cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(baseEnv(), env...)
+	if dir != "" {
+		// The repo is the one in dir, never one further up: a directory that isn't a repo after all must fail, not be taken for the repo
+		// around it.
+		if abs, err := filepath.Abs(dir); err == nil {
+			cmd.Env = append(cmd.Env, "GIT_CEILING_DIRECTORIES="+filepath.Dir(abs))
+		}
 	}
 	return cmd, nil
 }
+
+// repoEnv are the variables that point git at a particular repository, whatever directory it runs in. Git sets them for hooks and
+// aliases; inherited from there, they would make pit work on that one repository in every repo's name.
+var repoEnv = []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_NAMESPACE",
+	"GIT_CEILING_DIRECTORIES"}
+
+// environ is pit's environment without repoEnv.
+var environ = sync.OnceValue(func() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(repoEnv, strings.ToUpper(name)) {
+			env = append(env, kv)
+		}
+	}
+	return env
+})
+
+// baseEnv returns a copy of environ to add to.
+func baseEnv() []string { return slices.Clone(environ()) }
 
 // Raw runs git in dir with stdin (may be nil) and returns its stdout.
 func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
