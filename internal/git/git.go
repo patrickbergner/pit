@@ -89,7 +89,17 @@ func command(dir string, env []string, args []string, shown bool) (*exec.Cmd, er
 
 // Raw runs git in dir with stdin (may be nil) and returns its stdout.
 func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd, err := command(dir, nil, args, false)
+	return raw(dir, nil, stdin, args)
+}
+
+// Remote is Output for commands that reach a remote, possibly in parallel: interactive credential prompts are disabled, as for Combined.
+func Remote(dir string, args ...string) (string, error) {
+	out, err := raw(dir, []string{"GIT_TERMINAL_PROMPT=0"}, nil, args)
+	return strings.TrimRight(string(out), "\n"), err
+}
+
+func raw(dir string, env []string, stdin io.Reader, args []string) ([]byte, error) {
+	cmd, err := command(dir, env, args, false)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}

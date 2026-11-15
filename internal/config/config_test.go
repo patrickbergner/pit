@@ -42,6 +42,7 @@ func TestConfirmPushGroups(t *testing.T) {
 		"x": {"url": "u", "path": "x", "groups": ["private"]},
 		"y": {"url": "u", "path": "y", "groups": ["public", "work"]}
 	}`
+	root := []string{RootKey}
 	for _, tc := range []struct {
 		settings string
 		groups   []string
@@ -49,11 +50,15 @@ func TestConfirmPushGroups(t *testing.T) {
 	}{
 		{`{"confirmPushGroups": {"private": false}}`, []string{"private"}, false},
 		{`{"confirmPushGroups": {"private": false}}`, []string{"public", "work"}, true}, // not overridden: confirmPush, default true
-		{`{"confirmPushGroups": {"private": false}}`, nil, true},                        // the root repo is in no group
+		{`{"confirmPushGroups": {"private": false}}`, root, true},                       // the root repo is in no group
 		{`{"confirmPush": false, "confirmPushGroups": {"work": true}}`, []string{"public", "work"}, true},
-		{`{"confirmPush": false, "confirmPushGroups": {"work": true}}`, nil, false},
+		{`{"confirmPush": false, "confirmPushGroups": {"work": true}}`, root, false},
 		{`{"confirmPushGroups": {"public": false, "work": false}}`, []string{"public", "work"}, false},
 		{`{"confirmPushGroups": {"public": false, "work": true}}`, []string{"public", "work"}, true}, // they disagree: asking wins
+		// the root repo by its own key
+		{`{"confirmPushGroups": {"private": false, ".": false}}`, root, false},
+		{`{"confirmPushGroups": {".": false}}`, []string{"private"}, true},
+		{`{"confirmPush": false, "confirmPushGroups": {".": true}}`, root, true},
 	} {
 		c, err := Parse([]byte(`{"settings": ` + tc.settings + `, ` + exts + `}`))
 		if err != nil {
@@ -65,13 +70,18 @@ func TestConfirmPushGroups(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ json, want string }{
-		{`{"settings": {"confirmPushGroups": {"privat": false}}, ` + exts + `}`, `no external is in group "privat" (groups: private, public, work)`},
-		{`{"settings": {"confirmPushGroups": {"private": false}}}`, `no external is in group "private" (no external has groups)`},
+		{`{"settings": {"confirmPushGroups": {"privat": false}}, ` + exts + `}`,
+			`no external is in group "privat" (groups: private, public, work; "." for the root repo)`},
+		{`{"settings": {"confirmPushGroups": {"private": false}}}`, `no external is in group "private" (no external has groups; "." for`},
 		{`{"settings": {"confirmPushGroups": ["private"]}, ` + exts + `}`, "invalid JSON"},
 	} {
 		if _, err := Parse([]byte(tc.json)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("Parse(%s) = %v, want an error containing %q", tc.json, err, tc.want)
 		}
+	}
+	// the root repo's key needs no groups
+	if _, err := Parse([]byte(`{"settings": {"confirmPushGroups": {".": false}}}`)); err != nil {
+		t.Error(err)
 	}
 }
 

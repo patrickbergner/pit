@@ -101,7 +101,7 @@ Paths in output are relative to the current directory, like git prints them. Opt
 | Command | What it does |
 |---|---|
 | `pit sync` | Clone missing externals, check existing ones, update the root's `.gitignore` |
-| `pit list` | The externals with path, branch, groups and URL, and whether they are cloned |
+| `pit list` | The externals with path, branch, groups and URL, and whether they are cloned; the root directory |
 | `pit status [--fetch]` | Branch, ahead/behind and changed files per repo |
 | `pit diff [<options>]` | The diffs of all repos, as one diff of the whole tree |
 | `pit add <path>...` / `pit add -A` | Stage, each path in the repo that owns it |
@@ -112,7 +112,10 @@ Paths in output are relative to the current directory, like git prints them. Opt
 | `pit log [-n <count>] [--oneline]` | One log across all repos |
 | `pit fetch` | Fetch all repos |
 | `pit pull` | Pull all repos that have an upstream |
-| `pit push [-n] [-i \| -y]` | Show what each repo would push, ask repo by repo, then push |
+| `pit push [-n] [-i \| -y]` | Show what each repo would push, new tags included, ask repo by repo, then push |
+| `pit tag` | The latest tag of each repo and the commits since |
+| `pit tag -r <repo> <name>` | Tag HEAD of the selected repos |
+| `pit pushtag [-i \| -y] -r <repo> <name>` | Tag, then push as `pit push` does |
 | `pit each [--] <git args>` | Run any git command in each repo |
 | `pit version` | Show the version |
 
@@ -137,8 +140,8 @@ Fast-forward
 
 ```
 
-`sync`, `status`, `fetch`, `pull`, `push`, `commit` and `each` all do this; `add` and `restore` do it only with `-p` / `-i`, when git asks
-hunk by hunk. `diff` and `log` stay one diff and one log of the whole tree, and `list` is one table.
+`list`, `sync`, `status`, `fetch`, `pull`, `push`, `commit`, `tag`, `pushtag` and `each` all do this; `add` and `restore` do it only
+with `-p` / `-i`, when git asks hunk by hunk. `diff` and `log` stay one diff and one log of the whole tree.
 
 pit colors its output lightly, when it goes to a terminal: the headers, the branches and changes in `status`, questions, warnings and
 errors. On Windows, that's a console as well as Git Bash's mintty. `NO_COLOR` set to anything turns colors off. `--color[=always|never|auto]`
@@ -253,14 +256,26 @@ The summary lists what needs attention, and you resolve it in that repo with git
 
 ### `pit push`
 
-`pit push` fetches first, then shows the plan: a block per repo with the branch, where it goes, and the commits about to be pushed. A repo that has
-diverged from its upstream is marked `(can't push)`, since git would reject its push; `pit pull` it first. (Passing `--force`,
-`--force-with-lease` or `--force-if-includes` lifts that check.)
+`pit push` fetches first, then shows the plan: a block per repo with the branch, where it goes, the commits about to be pushed, and the
+new tags. A repo that has diverged from its upstream is marked `(can't push)`, since git would reject its push; `pit pull` it first.
+(Passing `--force`, `--force-with-lease` or `--force-if-includes` lifts that check.)
+
+```
+─── pit (pit/public) ───────────────────────────────────────────────────────────
+main -> origin/main
+  1a2b3c4 Release 1.4.1
+tag v1.4.1 -> origin
+```
+
+**Tags** go along with the branch: the tags on the pushed branch that its remote doesn't have yet, which pit finds out with
+`git ls-remote`. A repo with nothing new but a tag gets pushed, too. Branch and tags go in one atomic push, so a tag never reaches the
+remote without the commits it's on, and a release never starts from a commit the branch doesn't have. Tags that aren't on the branch
+stay local; pit mentions them. That's why `--tags` and `--follow-tags`, which push tags by git's rules instead, are refused.
 
 Next, pit asks repo by repo whether to push it. Repos that can't be pushed are skipped, and you're still asked about all the others:
 
 ```
-(1/3) Push pit: main -> origin/main, 2 commits? [y,n,a,s,?] y
+(1/3) Push pit: main -> origin/main, 2 commits, tag v1.4.1? [y,n,a,s,?] y
 (2/3) Push bond: feature/x -> origin/feature/x, 1 commit? [y,n,a,s,?] n
 (3/3) Push (pit root): main -> origin/main, 1 commit? [y,n,a,s,?] y
 ```
@@ -272,14 +287,39 @@ Without an answer (stdin closed), pit pushes nothing.
 
 Asking is on by default. `"confirmPush": false` in the [settings](#configuration) turns it off. `confirmPushGroups` overrides it for
 the externals in some groups, e.g. `{"private": false}` pushes the `private` externals without asking while pit still asks about the
-others. Repos that need no question are pushed along with the ones you answer `y` for (pit names them before asking); Ctrl-C or no answer
-still pushes nothing. On the command line, `-y` (`--yes`) pushes without asking and `-i` (`--interactive`) asks about every repo, whatever
-the config says. **Without any question, a repo that can't be pushed stops the whole push**: nobody chose to leave it behind, and
-related commits in the other repos shouldn't go out without it. `pit push -i` lets you push the others anyway.
+others. The root repo is in no group; the key `"."` overrides it for the root repo. Repos that need no question are pushed along with
+the ones you answer `y` for (pit names them before asking); Ctrl-C or no answer still pushes nothing. On the command line, `-y`
+(`--yes`) pushes without asking and `-i` (`--interactive`) asks about every repo, whatever the config says. **Without any question, a
+repo that can't be pushed stops the whole push**: nobody chose to leave it behind, and related commits in the other repos shouldn't go
+out without it. `pit push -i` lets you push the others anyway.
 
 Then it pushes the chosen repos one by one, root last. If one fails, pit stops and lists what was pushed and what wasn't. A branch without
 upstream is pushed to `origin` with `-u`. `-n` (`--dry-run`) shows the plan only, without asking. pit exits with an error whenever a repo
 was left out because of a problem, so a partial push never looks complete.
+
+### `pit tag`, `pit pushtag`
+
+Without a name, `pit tag` shows each repo's latest tag on HEAD and how many commits came since, i.e. which repos have unreleased
+changes:
+
+```
+$ pit tag -g public
+─── pit (pit/public) ───────────────────────────────────────────────────────────
+v1.4.0, 3 commits since
+
+─── bond (bond/public) ─────────────────────────────────────────────────────────
+v0.2.1
+
+2 more repos without tags
+```
+
+`pit tag -r pit v1.4.1` tags HEAD of the repos selected with `-r` or `-g`. Each repo has versions of its own, so pit doesn't tag all
+repos unless you name them. All of them are checked first (a commit to tag, no tag of that name yet), and if one can't be tagged, none
+is. The tags are lightweight, like `git tag v1.4.1`.
+
+`pit pushtag -r pit v1.4.1` tags, then pushes those repos as `pit push` does, asking as `confirmPush` says (`-i` and `-y` work, too).
+The new tag goes along with any commits not pushed yet. It refuses a name the remote already has a tag of. If you answer `n`, the tag stays
+local, and a later `pit push` publishes it.
 
 ### `pit each`
 
@@ -302,7 +342,7 @@ Runs the git command in each repo, its output in a block per repo, and fails if 
   "settings": {
     "defaultBranch": "main",
     "confirmPush": true,
-    "confirmPushGroups": { "go": false }
+    "confirmPushGroups": { "go": false, ".": false }
   },
   "externals": {
     "mylib": { "url": "https://github.com/you/mylib.git", "path": "libs/mylib", "groups": ["libs", "go"] },
@@ -315,7 +355,7 @@ Runs the git command in each repo, its output in a block per repo, and fails if 
 |---|---|
 | `settings.defaultBranch` | Branch of externals that set none (default `main`) |
 | `settings.confirmPush` | Whether `pit push` asks repo by repo before pushing (default `true`); `-y` / `-i` override it |
-| `settings.confirmPushGroups` | `confirmPush` for the externals of these groups, e.g. `{"private": false}`; for an external in several of them that disagree, asking wins. The root repo is in no group |
+| `settings.confirmPushGroups` | `confirmPush` for the externals of these groups, e.g. `{"private": false}`; for an external in several of them that disagree, asking wins. The key `"."` is for the root repo, which is in no group |
 | `externals.<name>` | Name used with `-r` and in output; letters, digits, `.`, `_`, `-` |
 | `url` | Clone URL (required) |
 | `path` | Directory relative to the root, with forward slashes (required) |
@@ -381,7 +421,7 @@ it. A `lock` left behind by a crashed pit can simply be deleted.
   `pit sync` gives you the current tip of every external, not a reproducible snapshot.
 - **No atomicity** across repos for commit, pull or push, only checks up front that catch the foreseeable failures.
 - **No branch management** beyond reporting; `pit each -- switch ...` does the job.
-- **No special handling** for Git LFS, submodules, hooks or tags. Each clone has its own setup, and git deals with it.
+- **No special handling** for Git LFS, submodules or hooks. Each clone has its own setup, and git deals with it.
 
 ## Development
 

@@ -31,11 +31,15 @@ type Config struct {
 type Settings struct {
 	DefaultBranch     string          `json:"defaultBranch"`     // default "main"
 	ConfirmPush       *bool           `json:"confirmPush"`       // default true; read with AskBeforePush
-	ConfirmPushGroups map[string]bool `json:"confirmPushGroups"` // overrides ConfirmPush for the externals in these groups
+	ConfirmPushGroups map[string]bool `json:"confirmPushGroups"` // overrides ConfirmPush for these groups' externals, RootKey for the root repo
 }
 
-// AskBeforePush reports whether pit push asks before pushing a repo in the given groups (none for the root repo): as confirmPushGroups says
-// for its groups, asking if they disagree, otherwise as confirmPush says (default true).
+// RootKey is the key of confirmPushGroups for the root repo, which belongs to no group. It is the root repo's name with -r, and can't be a
+// group's name.
+const RootKey = "."
+
+// AskBeforePush reports whether pit push asks before pushing a repo in the given groups ([RootKey] for the root repo): as confirmPushGroups
+// says for its groups, asking if they disagree, otherwise as confirmPush says (default true).
 func (s Settings) AskBeforePush(groups []string) bool {
 	overridden := false
 	for _, g := range groups {
@@ -179,12 +183,12 @@ func (c *Config) validate() error {
 	}
 	groups := c.Groups()
 	for _, g := range slices.Sorted(maps.Keys(c.Settings.ConfirmPushGroups)) {
-		if !slices.Contains(groups, g) {
+		if g != RootKey && !slices.Contains(groups, g) {
 			known := "no external has groups"
 			if len(groups) > 0 {
 				known = "groups: " + strings.Join(groups, ", ")
 			}
-			return fmt.Errorf("settings.confirmPushGroups: no external is in group %q (%s)", g, known)
+			return fmt.Errorf("settings.confirmPushGroups: no external is in group %q (%s; %q for the root repo)", g, known, RootKey)
 		}
 	}
 	return nil

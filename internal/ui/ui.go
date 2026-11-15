@@ -69,8 +69,8 @@ func paint(on bool, sgr, s string) string {
 	return "\033[" + sgr + "m" + s + "\033[0m"
 }
 
-// Dim, Red, Green and Yellow color s for stdout. Pad before coloring: padding counts the escapes otherwise.
-func Dim(s string) string    { return paint(colorOut, dim, s) }
+// Red, Green, Yellow and Cyan color s for stdout. Pad before coloring: padding counts the escapes otherwise.
+func Cyan(s string) string   { return paint(colorOut, cyan, s) }
 func Red(s string) string    { return paint(colorOut, red, s) }
 func Green(s string) string  { return paint(colorOut, green, s) }
 func Yellow(s string) string { return paint(colorOut, yellow, s) }

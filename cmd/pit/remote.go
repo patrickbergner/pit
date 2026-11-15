@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/patrickbergner/pit/internal/config"
 	"github.com/patrickbergner/pit/internal/git"
 	"github.com/patrickbergner/pit/internal/ui"
 	"github.com/patrickbergner/pit/internal/workspace"
@@ -91,14 +92,70 @@ func cmdPull(w *workspace.Workspace, args []string) error {
 	})
 }
 
-// pushStep is what pit push does in one repo.
+// pushStep is what pit push does in one repo: push the branch, its new tags, or both.
 type pushStep struct {
-	repo    *workspace.Repo
-	branch  string
-	dest    string   // e.g. origin/main
-	setUp   bool     // no upstream yet: push -u origin <branch>
-	commits []string // "<hash> <subject>"
-	blocked string   // why the repo can't be pushed, e.g. it diverged from its upstream
+	repo     *workspace.Repo
+	branch   string
+	dest     string   // e.g. origin/main; "" if only tags are pushed
+	setUp    bool     // no upstream yet: push -u origin <branch>
+	commits  []string // "<hash> <subject>"
+	remote   string   // where the tags go
+	mergeRef string   // the upstream branch on the remote (refs/heads/main), to push the branch to along with tags
+	tags     []string // new tags on the branch
+	blocked  string   // why the repo can't be pushed, e.g. it diverged from its upstream
+}
+
+// pushesBranch reports whether the step pushes the branch; otherwise it pushes only tags.
+func (st pushStep) pushesBranch() bool { return st.dest != "" }
+
+// what tells what the step pushes: "main -> origin/main, 2 commits, tag v1.4.1", or "tag v1.4.1 -> origin".
+func (st pushStep) what() string {
+	var parts []string
+	if st.pushesBranch() {
+		parts = append(parts, st.branch+" -> "+st.dest, ui.Plural(len(st.commits), "commit"))
+	}
+	if len(st.tags) > 0 {
+		t := tagList(st.tags, func(s string) string { return s })
+		if !st.pushesBranch() {
+			t += " -> " + st.remote
+		}
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// args returns the arguments of the step's git push. A branch without tags is pushed as git push would; with tags, branch and tags go in
+// one atomic push, so that a tag never gets to the remote without the commits it is on.
+func (st pushStep) args(opts []string) []string {
+	args := []string{"push"}
+	switch {
+	case len(st.tags) == 0 && st.setUp:
+		args = append(args, "-u", "origin", st.branch)
+	case len(st.tags) == 0:
+		// the branch to its upstream
+	case st.setUp:
+		args = append(args, "--atomic", "-u", "origin", st.branch)
+	case st.pushesBranch():
+		args = append(args, "--atomic", st.remote, "refs/heads/"+st.branch+":"+st.mergeRef)
+	default:
+		args = append(args, st.remote)
+	}
+	for _, t := range st.tags {
+		args = append(args, "refs/tags/"+t)
+	}
+	return append(args, opts...)
+}
+
+// tagList returns "tag v1" or "tags v1, v2", the names passed through paint.
+func tagList(tags []string, paint func(string) string) string {
+	names := make([]string, len(tags))
+	for i, t := range tags {
+		names[i] = paint(t)
+	}
+	if len(tags) == 1 {
+		return "tag " + names[0]
+	}
+	return "tags " + strings.Join(names, ", ")
 }
 
 func cmdPush(w *workspace.Workspace, args []string) error {
@@ -106,8 +163,23 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 	if err != nil {
 		return err
 	}
+	repos, err := p.selected(w)
+	if err != nil {
+		return err
+	}
+	_, err = pushRepos(w, p, repos)
+	return err
+}
+
+// pushRepos is pit push in the repos: the plan, the questions, the pushes. It returns the steps pushed.
+func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pushStep, error) {
 	if p.on("interactive") && p.on("yes") {
-		return errors.New("push: -i (ask) and -y (don't ask) exclude each other")
+		return nil, errors.New("push: -i (ask) and -y (don't ask) exclude each other")
+	}
+	for _, o := range []string{"--tags", "--follow-tags"} {
+		if hasOpt(p.opts, o) {
+			return nil, fmt.Errorf("push: pit pushes the new tags on each branch it pushes by itself; leave out %s", o)
+		}
 	}
 	// asks reports whether pit asks before pushing r: -y and -i decide for all repos, otherwise the settings for r's groups
 	asks := func(r *workspace.Repo) bool {
@@ -117,26 +189,31 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		case p.on("interactive"):
 			return true
 		case r.IsRoot():
-			return w.Config.Settings.AskBeforePush(nil)
+			return w.Config.Settings.AskBeforePush([]string{config.RootKey})
 		}
 		return w.Config.Settings.AskBeforePush(r.Ext.Groups)
 	}
 	force := slices.ContainsFunc(p.opts, func(o string) bool {
 		return o == "-f" || o == "--force" || strings.HasPrefix(o, "--force-with-lease") || strings.HasPrefix(o, "--force-if-includes")
 	})
-	repos, err := p.selected(w)
-	if err != nil {
-		return err
-	}
 	if err := fetchAll(repos, nil, true); err != nil {
-		return err
+		return nil, err
 	}
+	statuses := readStatuses(targetsOf(repos))
+	tags := findNewTags(statuses)
 
 	var steps []pushStep
 	var problems []string
 	var unpushable []string // repos left out because of a problem
-	for _, s := range readStatuses(targetsOf(repos)) {
+	for _, s := range statuses {
 		r := s.repo
+		nt := tags[r]
+		if nt.err != nil {
+			ui.Warn("%s: can't tell which tags %s lacks, so none are pushed: %s", r.Label(), nt.remote, nt.err)
+		}
+		if len(nt.elsewhere) > 0 {
+			ui.Note("%s: not pushing %s, not on %s", r.Label(), tagList(nt.elsewhere, func(s string) string { return s }), s.Branch)
+		}
 		switch {
 		case s.err != nil:
 			problems = append(problems, fmt.Sprintf("%s: %s", r.Label(), s.err))
@@ -145,12 +222,16 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		case s.Unborn:
 			continue
 		case s.Upstream != "" && !s.UpstreamGone:
-			if s.Ahead == 0 {
+			if s.Ahead == 0 && len(nt.onBranch) == 0 {
 				continue
 			}
-			st := pushStep{repo: r, branch: s.Branch, dest: s.Upstream, commits: logLines(r, "@{upstream}..HEAD")}
-			if s.Behind > 0 && !force {
-				st.blocked = fmt.Sprintf("%s and %s have diverged (↑%d ↓%d); pit pull first", s.Branch, s.Upstream, s.Ahead, s.Behind)
+			st := pushStep{repo: r, branch: s.Branch, remote: nt.remote, tags: nt.onBranch}
+			if s.Ahead > 0 {
+				st.dest, st.commits = s.Upstream, logLines(r, "@{upstream}..HEAD")
+				st.mergeRef, _ = git.Output(r.Dir, "config", "--get", "branch."+s.Branch+".merge")
+				if s.Behind > 0 && !force {
+					st.blocked = fmt.Sprintf("%s and %s have diverged (↑%d ↓%d); pit pull first", s.Branch, s.Upstream, s.Ahead, s.Behind)
+				}
 			}
 			steps = append(steps, st)
 			continue
@@ -167,37 +248,46 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 			ui.Note("%s: skipped, %s has no upstream and there is no remote 'origin'", r.Label(), s.Branch)
 			continue
 		}
-		remoteRef := "refs/remotes/origin/" + s.Branch
+		st := pushStep{repo: r, branch: s.Branch, remote: "origin", tags: nt.onBranch}
 		commits := logLines(r, "HEAD", "--not", "--remotes=origin")
-		if git.OK(r.Dir, "rev-parse", "-q", "--verify", remoteRef) && len(commits) == 0 {
+		if len(commits) > 0 || !git.OK(r.Dir, "rev-parse", "-q", "--verify", "refs/remotes/origin/"+s.Branch) {
+			st.dest, st.setUp, st.commits = "origin/"+s.Branch, true, commits
+		} else if len(st.tags) == 0 {
 			continue
 		}
-		steps = append(steps, pushStep{repo: r, branch: s.Branch, dest: "origin/" + s.Branch, setUp: true, commits: commits})
+		steps = append(steps, st)
 	}
 
 	if len(steps) == 0 && len(problems) == 0 {
 		fmt.Println("nothing to push")
-		return nil
+		return nil, nil
 	}
-	// the plan: a block per repo with where it goes and the commits
+	// the plan: a block per repo with where it goes, the commits and the tags
 	var pushable []pushStep
 	for _, st := range steps {
-		line := ui.Green(st.branch) + " -> " + st.dest
-		if st.setUp {
-			line += "  (sets upstream)"
-		}
 		if st.blocked != "" {
-			line += "  " + ui.Red("(can't push)")
 			problems = append(problems, st.repo.Label()+": "+st.blocked)
 			unpushable = append(unpushable, st.repo.Label())
 		} else {
 			pushable = append(pushable, st)
 		}
 		header(st.repo)
-		fmt.Println(line)
-		for _, c := range st.commits {
-			hash, subject, _ := strings.Cut(c, " ")
-			fmt.Println("  " + ui.Yellow(hash) + " " + subject)
+		if st.pushesBranch() {
+			line := ui.Green(st.branch) + " -> " + st.dest
+			if st.setUp {
+				line += "  (sets upstream)"
+			}
+			if st.blocked != "" {
+				line += "  " + ui.Red("(can't push)")
+			}
+			fmt.Println(line)
+			for _, c := range st.commits {
+				hash, subject, _ := strings.Cut(c, " ")
+				fmt.Println("  " + ui.Yellow(hash) + " " + subject)
+			}
+		}
+		if len(st.tags) > 0 {
+			fmt.Println(tagList(st.tags, ui.Yellow) + " -> " + st.remote)
 		}
 		ui.End()
 	}
@@ -215,14 +305,14 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 	switch {
 	case p.on("dry-run"):
 		if len(problems) > 0 {
-			return errSilent
+			return nil, errSilent
 		}
-		return nil
+		return nil, nil
 	case len(problems) > 0 && len(asked) == 0:
 		// Without questions nobody chose to leave these repos behind, so related commits elsewhere aren't pushed either.
-		return errors.New("push: nothing was pushed (pit push -i asks repo by repo and pushes the others)")
+		return nil, errors.New("push: nothing was pushed (pit push -i asks repo by repo and pushes the others)")
 	case len(pushable) == 0:
-		return errors.New("push: nothing was pushed")
+		return nil, errors.New("push: nothing was pushed")
 	}
 	if len(unpushable) > 0 {
 		ui.Note("skipping %s; asking about the other repos", strings.Join(unpushable, ", "))
@@ -238,7 +328,7 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		}
 		chosen, err := askPush(asked)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		yes := map[*workspace.Repo]bool{}
 		for _, st := range chosen {
@@ -247,21 +337,17 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 		steps = slices.DeleteFunc(steps, func(st pushStep) bool { return asks(st.repo) && !yes[st.repo] })
 		if len(steps) == 0 {
 			ui.Note("nothing pushed")
-			return notPushed(unpushable)
+			return nil, notPushed(unpushable)
 		}
 		fmt.Fprintln(os.Stderr) // the questions end, the pushes begin
 	}
 
 	for i, st := range steps {
 		if err := stopped(); err != nil {
-			return err
-		}
-		args := []string{"push"}
-		if st.setUp {
-			args = append(args, "-u", "origin", st.branch)
+			return steps[:i], err
 		}
 		header(st.repo)
-		err := git.Pass(st.repo.Dir, append(args, p.opts...)...)
+		err := git.Pass(st.repo.Dir, st.args(p.opts)...)
 		ui.End()
 		if err != nil {
 			var pushed, rest []string
@@ -280,11 +366,87 @@ func cmdPush(w *workspace.Workspace, args []string) error {
 			if len(unpushable) > 0 {
 				ui.Note("can't push: %s", strings.Join(unpushable, ", "))
 			}
-			return fmt.Errorf("push failed in %s", st.repo.Label())
+			return steps[:i], fmt.Errorf("push failed in %s", st.repo.Label())
 		}
 	}
 	ui.Note("pushed %s", ui.Plural(len(steps), "repo"))
-	return notPushed(unpushable)
+	return steps, notPushed(unpushable)
+}
+
+// newTags are the tags of a repo that its push remote lacks: those on the current branch, which pit push pushes along with it, and the
+// others, which it leaves alone.
+type newTags struct {
+	remote    string
+	onBranch  []string
+	elsewhere []string
+	err       error
+}
+
+// tagRemote returns the remote pit push sends a repo's tags to, along with its branch: the upstream's remote, or origin if the branch has
+// no upstream; "" if there is no such remote (or the upstream is in the repo itself).
+func tagRemote(s repoStatus) string {
+	remote := "origin"
+	if s.Upstream != "" && !s.UpstreamGone {
+		if rm, err := git.Output(s.repo.Dir, "config", "--get", "branch."+s.Branch+".remote"); err == nil && rm != "" {
+			remote = rm
+		}
+	}
+	if !git.OK(s.repo.Dir, "remote", "get-url", remote) {
+		return ""
+	}
+	return remote
+}
+
+// findNewTags asks the remotes, in parallel, which tags they lack. Repos without tags don't need to ask.
+func findNewTags(statuses []repoStatus) map[*workspace.Repo]newTags {
+	var rs []*workspace.Repo
+	byRepo := map[*workspace.Repo]repoStatus{}
+	for _, s := range statuses {
+		rs, byRepo[s.repo] = append(rs, s.repo), s
+	}
+	found := map[*workspace.Repo]newTags{}
+	for i, nt := range workspace.Parallel(rs, func(r *workspace.Repo) newTags { return lookupNewTags(byRepo[r]) }) {
+		found[rs[i]] = nt
+	}
+	return found
+}
+
+func lookupNewTags(s repoStatus) newTags {
+	r := s.repo
+	if s.err != nil || s.Detached || s.Unborn || !r.HasRemotes() {
+		return newTags{}
+	}
+	local, err := git.Output(r.Dir, "tag", "--list", "--sort=version:refname")
+	if err != nil || local == "" {
+		return newTags{err: err}
+	}
+	nt := newTags{remote: tagRemote(s)}
+	if nt.remote == "" {
+		return newTags{}
+	}
+	out, err := git.Remote(r.Dir, "ls-remote", "--tags", "--refs", nt.remote)
+	if err != nil {
+		nt.err = err
+		return nt
+	}
+	onRemote := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		if _, ref, ok := strings.Cut(l, "\t"); ok {
+			onRemote[strings.TrimPrefix(ref, "refs/tags/")] = true
+		}
+	}
+	merged, _ := git.Output(r.Dir, "tag", "--merged", "HEAD")
+	onBranch := strings.Split(merged, "\n")
+	for _, t := range strings.Split(local, "\n") {
+		switch {
+		case onRemote[t]:
+		case slices.Contains(onBranch, t):
+			nt.onBranch = append(nt.onBranch, t)
+		default:
+			nt.elsewhere = append(nt.elsewhere, t)
+		}
+	}
+	return nt
 }
 
 // notPushed makes pit exit with an error when repos were left out because of a problem, so the push doesn't look complete.
@@ -306,8 +468,7 @@ s - skip this repo and all remaining ones
 func askPush(steps []pushStep) ([]pushStep, error) {
 	var chosen []pushStep
 	for i, st := range steps {
-		prompt := fmt.Sprintf("(%d/%d) Push %s: %s -> %s, %s? [y,n,a,s,?]", i+1, len(steps), st.repo.Label(), st.branch, st.dest,
-			ui.Plural(len(st.commits), "commit"))
+		prompt := fmt.Sprintf("(%d/%d) Push %s: %s? [y,n,a,s,?]", i+1, len(steps), st.repo.Label(), st.what())
 		for {
 			answer, err := ui.Ask(prompt, interruptCh)
 			if errors.Is(err, ui.ErrNoAnswer) {

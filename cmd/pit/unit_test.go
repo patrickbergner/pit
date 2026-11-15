@@ -111,3 +111,33 @@ func TestColorOptions(t *testing.T) {
 		t.Error("--color=sometimes accepted")
 	}
 }
+
+func TestPushArgs(t *testing.T) {
+	opts := []string{"--force-with-lease"}
+	for _, tc := range []struct {
+		step pushStep
+		want []string
+	}{
+		{pushStep{branch: "main", dest: "origin/main"}, []string{"push", "--force-with-lease"}},
+		{pushStep{branch: "x", dest: "origin/x", setUp: true}, []string{"push", "-u", "origin", "x", "--force-with-lease"}},
+		// with tags: one atomic push, the branch to its upstream branch by name
+		{pushStep{branch: "main", dest: "up/master", remote: "up", mergeRef: "refs/heads/master", tags: []string{"v1"}},
+			[]string{"push", "--atomic", "up", "refs/heads/main:refs/heads/master", "refs/tags/v1", "--force-with-lease"}},
+		{pushStep{branch: "x", dest: "origin/x", setUp: true, remote: "origin", tags: []string{"v1"}},
+			[]string{"push", "--atomic", "-u", "origin", "x", "refs/tags/v1", "--force-with-lease"}},
+		// only tags
+		{pushStep{branch: "main", remote: "origin", tags: []string{"v1", "v2"}}, []string{"push", "origin", "refs/tags/v1", "refs/tags/v2", "--force-with-lease"}},
+	} {
+		if got := tc.step.args(opts); !slices.Equal(got, tc.want) {
+			t.Errorf("args(%+v) = %q, want %q", tc.step, got, tc.want)
+		}
+	}
+	st := pushStep{branch: "main", dest: "origin/main", commits: []string{"a x"}, remote: "origin", tags: []string{"v1"}}
+	if got := st.what(); got != "main -> origin/main, 1 commit, tag v1" {
+		t.Errorf("what = %q", got)
+	}
+	st = pushStep{branch: "main", remote: "origin", tags: []string{"v1", "v2"}}
+	if got := st.what(); got != "tags v1, v2 -> origin" {
+		t.Errorf("what = %q", got)
+	}
+}

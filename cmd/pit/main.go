@@ -59,9 +59,16 @@ Remotes:
                             Fetch all repos
   pull [<git pull options>] Pull every repo that has an upstream
   push [-n] [-i | -y] [<git push options>]
-                            Show what each repo would push, ask, then push
+                            Show what each repo would push, ask, then push;
+                            new tags on the pushed branch go along
                             -n: only show; -i: ask; -y: don't ask
                             (default: confirmPush, confirmPushGroups)
+
+Tags:
+  tag                       Latest tag and commits since, per repo
+  tag -r <repo> <name>      Tag HEAD of the selected repos (-r or -g)
+  pushtag [-i | -y] -r <repo> <name>
+                            Tag, then push them as pit push does
 
 Anything else:
   each [--] <git args>      Run a git command in each repo
@@ -117,6 +124,8 @@ var commands = map[string]command{
 	"fetch":   {run: cmdFetch, checks: true},
 	"pull":    {run: cmdPull, checks: true, locks: true},
 	"push":    {run: cmdPush, checks: true, locks: true},
+	"tag":     {run: cmdTag, checks: true}, // locks itself when it tags
+	"pushtag": {run: cmdPushTag, checks: true, locks: true},
 	"each":    {run: cmdEach, checks: true, locks: true},
 }
 

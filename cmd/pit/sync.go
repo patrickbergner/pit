@@ -179,7 +179,8 @@ func normalizeURL(u string) string {
 	return strings.ToLower(strings.TrimRight(u, "/"))
 }
 
-// cmdList shows the configured externals.
+// cmdList shows the configured externals, a block each with branch, groups and URL aligned across the blocks, then the root repo's block
+// with the root directory, and a summary.
 func cmdList(w *workspace.Workspace, args []string) error {
 	p, err := parseArgs("list", args, spec{noPaths: true})
 	if err != nil {
@@ -194,28 +195,48 @@ func cmdList(w *workspace.Workspace, args []string) error {
 	if len(w.Externals) == 0 {
 		fmt.Println("no externals configured in", w.Root)
 	}
-	nameW, pathW, branchW, groupsW := 0, 0, 0, 0
+	branchW, groupsW := 0, 0
 	for _, r := range repos {
-		nameW = max(nameW, len(r.Label()))
 		if !r.IsRoot() {
-			pathW, branchW = max(pathW, len(r.Path)), max(branchW, len(r.Ext.Branch))
-			groupsW = max(groupsW, len(groupList(r)))
+			branchW, groupsW = max(branchW, len(r.Ext.Branch)), max(groupsW, len(groupList(r)))
 		}
 	}
+	exts, uncloned := 0, 0
+	var groups []string
 	for _, r := range repos {
+		header(r)
 		if r.IsRoot() {
-			fmt.Printf("%s  .\n", ui.Pad(r.Label(), nameW)) // the root directory itself
+			fmt.Println(w.Root)
+			ui.End()
 			continue
 		}
-		line := ui.Pad(r.Name, nameW) + "  " + ui.Pad(r.Path, pathW) + "  " + ui.Pad(r.Ext.Branch, branchW) + "  "
+		line := ui.Green(ui.Pad(r.Ext.Branch, branchW)) + "  "
 		if groupsW > 0 {
-			line += ui.Pad(groupList(r), groupsW) + "  "
+			line += ui.Cyan(ui.Pad(groupList(r), groupsW)) + "  "
 		}
 		line += r.Ext.URL
 		if !r.Cloned() {
 			line += "  " + ui.Yellow("(not cloned)")
+			uncloned++
 		}
 		fmt.Println(line)
+		ui.End()
+		exts++
+		for _, g := range r.Ext.Groups {
+			if !slices.Contains(groups, g) {
+				groups = append(groups, g)
+			}
+		}
+	}
+	if exts > 0 {
+		summary := ui.Plural(exts, "external")
+		if uncloned > 0 {
+			summary += fmt.Sprintf(", %d not cloned (pit sync)", uncloned)
+		}
+		if len(groups) > 0 {
+			summary += "; groups: " + strings.Join(groups, ", ")
+		}
+		fmt.Println(summary)
 	}
 	return nil
 }

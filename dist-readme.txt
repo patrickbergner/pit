@@ -49,7 +49,11 @@ Commands:
                               "settings": {"confirmPush": false}; -y skips
                               it, -i forces it. A repo that diverged from
                               its upstream is skipped when asking; without
-                              asking, it stops the whole push.
+                              asking, it stops the whole push. New tags on
+                              the pushed branch go along.
+  tag                         Latest tag and commits since, per repo
+  tag -r <repo> <name>        Tag HEAD of the selected repos
+  pushtag -r <repo> <name>    Tag, then push as pit push does
   each [--] <git args>        Run any git command in each repo
   version
 

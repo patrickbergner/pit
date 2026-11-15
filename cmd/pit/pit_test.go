@@ -34,8 +34,9 @@ func TestSyncClonesAndIgnores(t *testing.T) {
 	root := s.root(true, ext{"a", s.remote("a", false), "a"}, ext{"b", s.remote("b", false), "nested/b"}, ext{"e", empty, "e"})
 	s.write(root, ".gitignore", "*.log\n")
 
-	// the names are padded to the root repo's label; its path is the root itself
-	contains(t, s.pit(root, "list"), "a"+strings.Repeat(" ", 11)+"a ", "nested/b", "(not cloned)", "\n(pit root)  .\n")
+	// a block per repo: branch and URL; the root repo's block holds the root directory
+	contains(t, s.pit(root, "list"), block("a", "main  "+fileURL(s.path("remotes/a.git"))+"  (not cloned)\n\n"), block("b (nested/b)", "main  "), "  (not cloned)\n\n",
+		block("(pit root)", root+"\n\n"), "3 externals, 3 not cloned (pit sync)\n")
 	contains(t, s.pit(root, "status"), "not cloned (pit sync)")
 
 	out := s.pit(root, "sync")
@@ -491,11 +492,13 @@ func TestGroups(t *testing.T) {
 	out := s.pit(root, "sync", "-g", "go")
 	contains(t, out, block("a", "Cloning into 'a'"))
 	lacks(t, out, "─── b", "─── c")
+	// groups are padded alike, so that the URLs line up
 	out = s.pit(root, "list")
-	contains(t, out, "[libs, go]", "[libs]    ", "(not cloned)")
+	contains(t, out, block("a", "main  [libs, go]  file://"), block("b", "main  [libs]      file://"), block("c", "main              file://"),
+		"(not cloned)", "3 externals, 2 not cloned (pit sync); groups: libs, go\n")
 	out = s.pit(root, "list", "-g", "libs")
-	contains(t, out, "a  ", "b  ")
-	lacks(t, out, "c  ", "(pit root)")
+	contains(t, out, block("a", ""), block("b", ""), "2 externals")
+	lacks(t, out, "─── c", "(pit root)")
 
 	// status lists the group's uncloned members; other commands leave them out
 	out = s.pit(root, "status", "-g", "libs")
@@ -648,4 +651,126 @@ func TestPushConfirmPushGroups(t *testing.T) {
 	s.pit(root, "add", "a")
 	s.pit(root, "commit", "-m", "Asked")
 	contains(t, s.pitFails(root, "push", "-i"), "(1/1) Push a:", "no answer on stdin")
+
+	// "." configures the root repo: now a and the root repo go without a question
+	config := strings.Replace(s.read(root, "pit-externals.json"), `{"private": false}`, `{"private": false, ".": false}`, 1)
+	s.write(root, "pit-externals.json", config)
+	s.git(root, "commit", "-qam", "Root")
+	out = s.pit(root, "push")
+	contains(t, out, block("a", "To file://"), block("(pit root)", "To file://"), "pushed 2 repos")
+	lacks(t, out, "Push ")
+	if remoteHead("a") != "Asked" || remoteHead("forge") != "Root" {
+		t.Error("expected a and the root repo to be pushed")
+	}
+}
+
+func TestPushTags(t *testing.T) {
+	s := newSandbox(t)
+	root := s.standard()
+	a := s.path("forge/a")
+	remoteTags := func() string {
+		t.Helper()
+		return strings.ReplaceAll(s.git(s.dir, "--git-dir="+s.path("remotes/a.git"), "tag"), "\n", " ")
+	}
+	remoteHead := func() string {
+		t.Helper()
+		return s.git(s.dir, "--git-dir="+s.path("remotes/a.git"), "log", "-1", "--format=%s", "main")
+	}
+
+	// a new tag alone is something to push
+	s.git(a, "tag", "v1.0.0")
+	out := s.pit(root, "push", "-y")
+	contains(t, out, block("a", "tag v1.0.0 -> origin\n\n"), "[new tag]", "pushed 1 repo")
+	if remoteTags() != "v1.0.0" {
+		t.Errorf("remote tags = %q", remoteTags())
+	}
+	contains(t, s.pit(root, "push"), "nothing to push")
+
+	// a commit and its tag go together, and the question names the tag
+	s.write(root, "a/x.txt", "x\n")
+	s.pit(root, "add", "a")
+	s.pit(root, "commit", "-m", "Release 1.1.0")
+	s.git(a, "tag", "v1.1.0")
+	out, err := s.pitInput(root, "", nil, "push")
+	if err == nil {
+		t.Fatalf("push without an answer succeeded:\n%s", out)
+	}
+	contains(t, out, block("a", "main -> origin/main\n  "), " Release 1.1.0\ntag v1.1.0 -> origin\n\n",
+		"(1/1) Push a: main -> origin/main, 1 commit, tag v1.1.0?")
+	s.pit(root, "push", "-y")
+	if remoteHead() != "Release 1.1.0" || remoteTags() != "v1.0.0 v1.1.0" {
+		t.Errorf("remote: main at %q, tags %q", remoteHead(), remoteTags())
+	}
+
+	// a tag that isn't on the branch stays local; --tags, which would push it, is refused
+	s.git(a, "switch", "-q", "-c", "side")
+	s.write(root, "a/side.txt", "s\n")
+	s.commitAll(a, "Side")
+	s.git(a, "tag", "exp")
+	s.git(a, "switch", "-q", "main")
+	contains(t, s.pit(root, "push"), "a: not pushing tag exp, not on main", "nothing to push")
+	contains(t, s.pitFails(root, "push", "--tags"), "leave out --tags")
+	if remoteTags() != "v1.0.0 v1.1.0" {
+		t.Errorf("remote tags = %q", remoteTags())
+	}
+
+	// a branch that can't be pushed keeps its tag back too
+	other := s.path("other-a")
+	s.git(s.dir, "clone", "-q", fileURL(s.path("remotes/a.git")), other)
+	s.write(other, "theirs.txt", "t\n")
+	s.commitAll(other, "Theirs")
+	s.git(other, "push", "-q")
+	s.write(root, "a/y.txt", "y\n")
+	s.pit(root, "add", "a")
+	s.pit(root, "commit", "-m", "Release 1.2.0")
+	s.git(a, "tag", "v1.2.0")
+	contains(t, s.pitFails(root, "push", "-y"), "(can't push)", "nothing was pushed")
+	if remoteTags() != "v1.0.0 v1.1.0" {
+		t.Errorf("remote tags = %q", remoteTags())
+	}
+}
+
+func TestTagAndPushTag(t *testing.T) {
+	s := newSandbox(t)
+	root := s.standard()
+	contains(t, s.pit(root, "tag"), "all 3 repos without tags")
+
+	// tags are per repo, so pit tags only the repos named
+	contains(t, s.pitFails(root, "tag", "v1.0.0"), "give the repos to tag with -r or -g")
+	contains(t, s.pitFails(root, "tag", "-r", "a", "bad..name"), `"bad..name" isn't a valid tag name`)
+	out := s.pit(root, "tag", "-r", "a", "v1.0.0")
+	contains(t, out, block("a", "v1.0.0 on "), " init a\n", "pit push publishes it")
+	// all repos are checked before any is tagged
+	contains(t, s.pitFails(root, "tag", "-r", "a", "-r", "b", "v1.0.0"), "a: already has a tag v1.0.0", "nothing was tagged")
+	if s.git(s.path("forge/nested/b"), "tag") != "" {
+		t.Error("b was tagged")
+	}
+
+	// the overview: latest tag and the commits since
+	s.write(root, "a/x.txt", "x\n")
+	s.pit(root, "add", "a")
+	s.pit(root, "commit", "-m", "More")
+	contains(t, s.pit(root, "tag"), block("a", "v1.0.0, 1 commit since\n\n"), "2 more repos without tags")
+
+	// pushtag tags and pushes, asking as configured; v1.0.0, not pushed yet, goes along
+	out, err := s.pitInput(root, "y\n", nil, "pushtag", "-r", "a", "v1.1.0")
+	if err != nil {
+		t.Fatalf("pushtag: %v\n%s", err, out)
+	}
+	contains(t, out, "tagged v1.1.0 in a", "(1/1) Push a: main -> origin/main, 1 commit, tags v1.0.0, v1.1.0?", "pushed 1 repo")
+	if got := s.git(s.dir, "--git-dir="+s.path("remotes/a.git"), "tag"); got != "v1.0.0\nv1.1.0" {
+		t.Errorf("remote tags = %q", got)
+	}
+	// answered with no, the tag stays local; the same name can't be tagged where a remote has it
+	out, err = s.pitInput(root, "n\n", nil, "pushtag", "-r", "b", "v0.1.0")
+	if err != nil {
+		t.Fatalf("pushtag: %v\n%s", err, out)
+	}
+	contains(t, out, "nothing pushed", "v0.1.0 stays local in b; pit push publishes it")
+	s.pit(root, "push", "-y")
+	s.git(s.path("forge/nested/b"), "tag", "-d", "v0.1.0")
+	contains(t, s.pitFails(root, "pushtag", "-y", "-r", "b", "v0.1.0"), "b: origin already has a tag v0.1.0", "nothing was tagged")
+	if s.git(s.path("forge/nested/b"), "tag") != "" {
+		t.Error("b was tagged although origin has the tag")
+	}
 }
