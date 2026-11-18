@@ -68,7 +68,7 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 		statuses[s.repo] = s
 	}
 	var problems []string
-	for i, rt := range workspace.Parallel(repos, func(r *workspace.Repo) remoteTag {
+	lookup := func(r *workspace.Repo, asking bool) remoteTag {
 		s := statuses[r]
 		if s.err != nil {
 			return remoteTag{err: s.err}
@@ -77,9 +77,16 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 		if remote == "" {
 			return remoteTag{}
 		}
-		out, err := git.Output(r.Dir, "ls-remote", "--tags", "--refs", remote, "refs/tags/"+name)
+		args := []string{"ls-remote", "--tags", "--refs", remote, "refs/tags/" + name}
+		run := git.Output
+		if asking {
+			run = git.Prompting
+		}
+		out, err := run(r.Dir, args...)
 		return remoteTag{remote, out != "", err}
-	}) {
+	}
+	needsCredentials := func(rt remoteTag) bool { return rt.err != nil && git.NeedsCredentials(rt.err.Error()) }
+	for i, rt := range inTurns(repos, "to look at the remote's tags", lookup, needsCredentials) {
 		switch {
 		case rt.err != nil:
 			problems = append(problems, fmt.Sprintf("%s: %s", repos[i].Label(), rt.err))
@@ -94,10 +101,6 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 		for _, pr := range problems {
 			ui.Error("%s", pr)
 		}
-		return errors.New("pushtag: nothing was tagged")
-	}
-	if err := fetchAll(repos, nil, true); err != nil {
-		ui.Error("%s", err)
 		return errors.New("pushtag: nothing was tagged")
 	}
 	if err := createTags("pushtag", repos, name); err != nil {

@@ -74,3 +74,24 @@ func TestAbort(t *testing.T) {
 		t.Error("a git started after Abort ran")
 	}
 }
+
+// pit answers as askpass program only to the question of a run that set it up, not to a pit started by something git ran, which inherits
+// the variable.
+func TestAskpassRefusesOnlyQuestions(t *testing.T) {
+	question := []string{"Enter passphrase for key '/home/me/.ssh/id_ed25519': "}
+	if Askpass(question) {
+		t.Error("Askpass answered without " + askpassEnv)
+	}
+	t.Setenv(askpassEnv, "refuse")
+	for _, args := range [][]string{{"status"}, {"status", "--fetch"}, nil} {
+		if Askpass(args) {
+			t.Errorf("Askpass took pit %q for a question", args)
+		}
+	}
+	if !Askpass(question) {
+		t.Error("Askpass didn't refuse the question")
+	}
+	if !NeedsCredentials(refusal + `"Enter passphrase for key 'k'" while git runs in the background`) {
+		t.Error("NeedsCredentials doesn't see the refusal")
+	}
+}

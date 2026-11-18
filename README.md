@@ -133,8 +133,13 @@ owning those paths remain.
   repo, in config order, root last, and holds a lock (`.pit/lock`) so two pit commands don't interleave.
 - **Credentials.** git asks for them where you can answer: in `pull`, `push`, `sync` and everything else whose git output you see as it
   comes. Where git runs in the background, as in `fetch` and `status --fetch`, it can't ask, and fails at once instead of waiting for
-  an answer nobody can give; pit says where to enter them. This covers git's own prompts and Git Credential Manager, the credential
-  helper of Git for Windows (`GCM_INTERACTIVE=never`).
+  an answer nobody can give, or of several prompts fighting over one keyboard. This covers git's own prompts, Git Credential Manager,
+  the credential helper of Git for Windows (`GCM_INTERACTIVE=never`), and ssh asking for a key's passphrase or whether to trust a host:
+  `SSH_ASKPASS_REQUIRE=force` (OpenSSH 8.4 and later) makes ssh ask pit instead, which refuses.
+  In a terminal, the first repo where that happened then gets a turn of its own, in which git or ssh asks, after which the others are
+  tried again in parallel; one answer that does for all of them, such as a key that ssh's agent keeps for the session
+  (`AddKeysToAgent yes` in `~/.ssh/config`), is asked for once. Repos that still lack credentials get turns too. Without a terminal, pit
+  says where to enter them.
 - **Ctrl-C** stops before the next repo, once the git that runs has stopped too. A git that keeps waiting, for example for credentials in
   a window you don't see, is ended by a second Ctrl-C, together with what it started; pit then stops as after any other failure.
 
@@ -370,7 +375,8 @@ to   3c4d5e6 Merge branch 'feature/x'
 
 ### `pit fetch`, `pit pull`
 
-- `pit fetch` fetches all repos in parallel. Terminal prompts for credentials are disabled meanwhile; credential helpers work as usual.
+- `pit fetch` fetches all repos in parallel. Prompts for credentials are disabled meanwhile, and a repo that needs them gets a turn of
+  its own afterwards, as [Credentials](#commands) describes; credential helpers and ssh's agent work as usual.
 - `pit pull` runs `git pull` in every repo that has an upstream, honoring your git config (`pull.rebase`, `pull.ff`) and the options
   you pass (`--rebase`, `--ff-only`, ...). A repo that fails, e.g. with a conflict, doesn't stop the others; the summary lists it, and
   you resolve it there with git.

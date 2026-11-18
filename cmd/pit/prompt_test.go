@@ -57,6 +57,100 @@ func TestParallelRunsCantAsk(t *testing.T) {
 		"a: git needs credentials there, which it can't ask for while pit runs it in parallel; git fetch in "+a+" asks for them")
 }
 
+// lockedKey has the repos in dirs reach their remotes, the bare repos named in dirs, through a stand-in for ssh with a key whose passphrase
+// has to be entered once, after which an agent holds the key for all of them. Like ssh, it asks SSH_ASKPASS when
+// SSH_ASKPASS_REQUIRE=force and fails when that gives no answer; otherwise it asks on the terminal and gets the answer, and appends a line
+// to the file "asked" in the sandbox.
+func lockedKey(s *sandbox, dirs map[string]string) {
+	s.t.Helper()
+	ssh := filepath.ToSlash(s.path("fake-ssh.sh"))
+	s.write(s.dir, "fake-ssh.sh", `bare=$1
+if [ ! -e '`+filepath.ToSlash(s.path("agent-has-key"))+`' ]; then
+    if [ "$SSH_ASKPASS_REQUIRE" = force ]; then
+        "$SSH_ASKPASS" "Enter passphrase for key 'test': " >/dev/null || { echo "Permission denied (publickey)." >&2; exit 255; }
+    fi
+    echo passphrase >>'`+filepath.ToSlash(s.path("asked"))+`'
+    : >'`+filepath.ToSlash(s.path("agent-has-key"))+`'
+fi
+service=${3%% *} # git-upload-pack or git-receive-pack, after the host
+exec git "${service#git-}" "$bare"
+`)
+	for dir, bare := range dirs {
+		s.git(dir, "remote", "set-url", "origin", "ssh://git.example.com/"+filepath.Base(bare))
+		s.git(dir, "config", "ssh.variant", "simple")
+		s.git(dir, "config", "core.sshCommand", "sh '"+ssh+"' '"+filepath.ToSlash(bare)+"'")
+	}
+}
+
+// lockedStandard is standard with externals a and b behind lockedKey.
+func lockedStandard(s *sandbox) string {
+	s.t.Helper()
+	root := s.standard()
+	lockedKey(s, map[string]string{s.path("forge/a"): s.path("remotes/a.git"), s.path("forge/nested/b"): s.path("remotes/b.git")})
+	return root
+}
+
+func TestSSHCantAskInParallel(t *testing.T) {
+	s := newSandbox(t)
+	root := lockedStandard(s)
+
+	// with nobody to answer, ssh's question goes to pit as its askpass program, which refuses it, and ssh fails at once
+	start := time.Now()
+	out := s.pitFails(root, "fetch")
+	if time.Since(start) > 20*time.Second {
+		t.Errorf("fetch took %s", time.Since(start))
+	}
+	contains(t, out, `pit: can't ask "Enter passphrase for key 'test'" while git runs in the background`, "Permission denied (publickey)",
+		"a: git needs credentials there, which it can't ask for while pit runs it in parallel",
+		"b: git needs credentials there, which it can't ask for while pit runs it in parallel")
+	if s.exists(s.dir, "asked") {
+		t.Errorf("ssh asked on the terminal:\n%s", s.read(s.dir, "asked"))
+	}
+}
+
+func TestCredentialsAreAskedForOnce(t *testing.T) {
+	s := newSandbox(t)
+	root := lockedStandard(s)
+	seed := s.path("seed/b")
+	s.write(seed, "news.md", "news\n")
+	s.commitAll(seed, "news")
+	s.git(seed, "push", "-q", "origin", "main")
+
+	// a gets a turn of its own, in which ssh asks; with the key in the agent then, b is fetched in parallel again, without asking
+	out, err := s.pitEnv(root, []string{"PIT_TEST_CAN_ASK=1"}, "status", "--fetch")
+	if err != nil {
+		t.Fatalf("status --fetch failed: %v\n%s", err, out)
+	}
+	contains(t, out, "a: git needs credentials to fetch, so it runs there on its own, where it can ask for them",
+		block("b (nested/b)", "main  ↓1\n"))
+	lacks(t, out, "b: git needs credentials", "can't ask")
+	if got := s.read(s.dir, "asked"); got != "passphrase\n" {
+		t.Errorf("ssh asked %q, want once", got)
+	}
+}
+
+func TestPushTagAsksForCredentialsOnce(t *testing.T) {
+	s := newSandbox(t)
+	root := lockedStandard(s)
+
+	// the look at the remotes' tags comes before the fetch: there a gets its turn, and the fetch and push need no more
+	out, err := s.pitEnv(root, []string{"PIT_TEST_CAN_ASK=1"}, "pushtag", "-y", "-r", "a", "-r", "b", "v1.0.0")
+	if err != nil {
+		t.Fatalf("pushtag failed: %v\n%s", err, out)
+	}
+	contains(t, out, "a: git needs credentials to look at the remote's tags, so it runs there on its own, where it can ask for them",
+		"tagged v1.0.0 in a, b")
+	lacks(t, out, "b: git needs credentials", "can't ask")
+	if got := s.read(s.dir, "asked"); got != "passphrase\n" {
+		t.Errorf("ssh asked %q, want once", got)
+	}
+	for _, name := range []string{"a", "b"} {
+		if got := s.git(s.dir, "--git-dir="+s.path("remotes/"+name+".git"), "tag"); got != "v1.0.0" {
+			t.Errorf("tags on %s's remote = %q", name, got)
+		}
+	}
+}
+
 func TestSecondInterruptEndsGit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a Ctrl-C can't be sent to a process on Windows; internal/git's TestAbort covers ending git there")

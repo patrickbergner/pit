@@ -93,8 +93,11 @@ config: "groups": ["work", "go"]. Options pit doesn't know are passed on
 to git. In a terminal, diff, grep, log and show page their output with
 git's pager; --no-pager turns that off.
 
-Where git runs in the background (fetch, status --fetch), it can't ask for
-credentials and fails at once; pit says where to enter them. Ctrl-C stops
-before the next repo; a second Ctrl-C also ends a git that keeps waiting.
+Where git runs in the background (fetch, status --fetch), neither git nor
+ssh can ask for credentials or a key's passphrase, so it fails at once. In
+a terminal, the first such repo then gets a turn of its own to ask, and the
+others are tried again; an answer that does for all, like a key in ssh's
+agent, is asked for once. Ctrl-C stops before the next repo; a second
+Ctrl-C also ends a git that keeps waiting.
 
 Full documentation: https://github.com/patrickbergner/pit

@@ -79,10 +79,39 @@ var pagerEnv []string
 // SetPagerInUse tells git that the output pit shows goes through a pager.
 func SetPagerInUse() { pagerEnv = []string{"GIT_PAGER_IN_USE=true"} }
 
-// noPrompts keeps git from asking for anything in the runs whose output pit captures, where a prompt could neither be seen nor answered
-// and git would wait forever. GIT_TERMINAL_PROMPT covers git's own prompts, not credential helpers; Git Credential Manager, the helper of
-// Git for Windows, has a switch of its own, without which it opens a prompt or window nobody sees. Either way git fails at once instead.
-var noPrompts = []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"}
+// noPrompts keeps git, and the ssh it connects through, from asking for anything in the runs whose output pit captures, where a prompt
+// could neither be seen nor answered and git would wait forever. GIT_TERMINAL_PROMPT covers git's own prompts, not credential helpers; Git
+// Credential Manager, the helper of Git for Windows, has a switch of its own, without which it opens a prompt or window nobody sees. ssh
+// heeds neither: it asks for a key's passphrase, or whether to trust a new host, on the terminal, which it opens itself whatever git's
+// stdin is. Several of those at once, one per repo fetched in parallel, take turns at the one keyboard and turn its echo off, and none
+// gets a whole answer. SSH_ASKPASS_REQUIRE=force (OpenSSH 8.4 and later) makes ssh ask its SSH_ASKPASS program instead, and that is pit
+// itself, which refuses (see Askpass). Either way git fails at once instead.
+var noPrompts = sync.OnceValue(func() []string {
+	env := []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"}
+	if exe, err := os.Executable(); err == nil {
+		// Forward slashes, which the MSYS2 ssh of Git for Windows runs as well as a native ssh does
+		env = append(env, "SSH_ASKPASS="+filepath.ToSlash(exe), "SSH_ASKPASS_REQUIRE=force", askpassEnv+"=refuse")
+	}
+	return env
+})
+
+// askpassEnv marks the git runs whose SSH_ASKPASS is pit (see noPrompts).
+const askpassEnv = "PIT_ASKPASS"
+
+// refusal starts the message pit prints as askpass program, which NeedsCredentials looks for.
+const refusal = "pit: can't ask "
+
+// Askpass handles a run of pit as the askpass program of a git run where nothing can be asked (see noPrompts), and reports whether this
+// is one: then it has said so on stderr, which ends up in git's message, and pit exits with 1, which ssh and git take for no answer.
+// git itself also asks SSH_ASKPASS, if neither GIT_ASKPASS nor core.askPass is set. Either one passes the question as the only argument;
+// that, and not only the variable, tells such a run from a pit started by something git ran, which inherits the variable.
+func Askpass(args []string) bool {
+	if os.Getenv(askpassEnv) != "refuse" || len(args) != 1 || !strings.Contains(args[0], " ") {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "%s\"%s\" while git runs in the background\n", refusal, strings.TrimRight(args[0], ": "))
+	return true
+}
 
 // Every git process pit runs belongs to abortCtx, which Abort cancels.
 var abortCtx, abortRuns = context.WithCancel(context.Background())
@@ -159,7 +188,7 @@ func run(cmd *exec.Cmd) error {
 // Raw runs git in dir with stdin (may be nil) and returns its stdout. git can't ask for anything (see noPrompts); that goes for all the
 // runners that capture stderr: Raw, Output, Input, OK and Combined.
 func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd, err := command(dir, noPrompts, args, false)
+	cmd, err := command(dir, noPrompts(), args, false)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
@@ -207,21 +236,40 @@ func OK(dir string, args ...string) bool {
 // Combined runs git in dir without a terminal: no stdin, no prompts (see noPrompts), stdout and stderr captured together. It is for
 // commands that run in parallel, whose output is printed afterwards.
 func Combined(dir string, args ...string) ([]byte, error) {
-	cmd, err := command(dir, noPrompts, args, true)
+	return combined(dir, false, args)
+}
+
+// Asking is Combined for a repo that gets a turn of its own after git needed credentials there in a parallel run: now git, its credential
+// helper and ssh may ask for them, on the terminal, which they open themselves, while pit still captures what git prints.
+func Asking(dir string, args ...string) ([]byte, error) {
+	return combined(dir, true, args)
+}
+
+func combined(dir string, asking bool, args []string) ([]byte, error) {
+	env := noPrompts()
+	if asking {
+		env = nil
+	}
+	cmd, err := command(dir, env, args, true)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
+	if asking {
+		cmd.Stdin = os.Stdin
+	}
 	if err := run(cmd); err != nil {
 		return out.Bytes(), &Error{args, "", err}
 	}
 	return out.Bytes(), nil
 }
 
-// NeedsCredentials reports whether git's message says that it failed for want of credentials it couldn't ask for (see noPrompts).
+// NeedsCredentials reports whether git's message says that it failed for want of credentials it couldn't ask for (see noPrompts): git's,
+// Git Credential Manager's, or ssh's for a key's passphrase or a host to trust, which pit refused as its askpass program.
 func NeedsCredentials(msg string) bool {
-	return strings.Contains(msg, "terminal prompts disabled") || strings.Contains(msg, "user interactivity has been disabled")
+	return strings.Contains(msg, "terminal prompts disabled") || strings.Contains(msg, "user interactivity has been disabled") ||
+		strings.Contains(msg, refusal)
 }
 
 // Pass runs git in dir attached to the terminal: stdin, stdout and stderr are pit's own.

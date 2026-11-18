@@ -19,6 +19,9 @@ func TestMain(m *testing.M) {
 		if os.Getenv("PIT_TEST_TERMINAL") == "1" { // as if stdout were a terminal, for the pager
 			stdoutTerminal = func() bool { return true }
 		}
+		if os.Getenv("PIT_TEST_CAN_ASK") == "1" { // as if stderr were a terminal, where someone answers what git asks
+			canAsk = func() bool { return true }
+		}
 		os.Exit(run(os.Args[1:]))
 	}
 	os.Exit(m.Run())

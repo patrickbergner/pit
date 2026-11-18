@@ -210,6 +210,9 @@ var commands = map[string]command{
 
 // run is pit's entry point, also for the tests, which run the test binary as pit.
 func run(args []string) int {
+	if git.Askpass(args) {
+		return 1
+	}
 	catchSignals()
 	args, color, err := colorOptions(args)
 	git.SetColor(ui.SetColor(color))

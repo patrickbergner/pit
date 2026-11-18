@@ -19,19 +19,68 @@ func noteCredentials(r *workspace.Repo) {
 		r.Label(), r.Dir)
 }
 
-// fetchAll fetches the repos in parallel. Afterwards, each repo that printed something gets a block with it; quiet shows only failures.
+// canAsk reports whether someone can answer what git asks: pit's messages go to a terminal. Tests replace it.
+var canAsk = func() bool { return ui.Terminal(os.Stderr) }
+
+// inTurns runs f for the repos in parallel, where git can't ask for anything (see git.Combined), and returns the results in the repos'
+// order. A repo whose run needed credentials then gets a turn of its own, in which f runs with asking set: git, or the ssh it connects
+// through, may ask for them on the terminal, if someone can answer there (canAsk); otherwise the result stays, and the caller says where
+// to enter them. One answer often does for the other repos too, as a key that ssh now has in its agent or a password that a credential
+// helper keeps, so after each turn the repos still waiting run in parallel again, and only those that still lack credentials get turns.
+// doing says what git needs them for, as in "to fetch".
+func inTurns[T any](repos []*workspace.Repo, doing string, f func(r *workspace.Repo, asking bool) T, needsCredentials func(T) bool) []T {
+	results := workspace.Parallel(repos, func(r *workspace.Repo) T { return f(r, false) })
+	var waiting []int // indexes of the repos still lacking credentials, in config order
+	for i, res := range results {
+		if needsCredentials(res) {
+			waiting = append(waiting, i)
+		}
+	}
+	for len(waiting) > 0 && canAsk() && stopped() == nil {
+		i := waiting[0]
+		waiting = waiting[1:]
+		ui.Note("%s: git needs credentials %s, so it runs there on its own, where it can ask for them", repos[i].Label(), doing)
+		results[i] = f(repos[i], true)
+		if len(waiting) == 0 {
+			break
+		}
+		rest := make([]*workspace.Repo, len(waiting))
+		for k, j := range waiting {
+			rest[k] = repos[j]
+		}
+		var still []int
+		for k, res := range workspace.Parallel(rest, func(r *workspace.Repo) T { return f(r, false) }) {
+			results[waiting[k]] = res
+			if needsCredentials(res) {
+				still = append(still, waiting[k])
+			}
+		}
+		waiting = still
+	}
+	return results
+}
+
+// fetchAll fetches the repos in parallel, with turns for those that need credentials (see inTurns). Afterwards, each repo that printed
+// something gets a block with it; quiet shows only failures.
 func fetchAll(repos []*workspace.Repo, opts []string, quiet bool) error {
 	type result struct {
 		out []byte
 		err error
 	}
-	results := workspace.Parallel(repos, func(r *workspace.Repo) result {
+	args := append([]string{"fetch"}, opts...)
+	fetch := func(r *workspace.Repo, asking bool) result {
 		if !r.HasRemotes() {
 			return result{}
 		}
-		out, err := git.Combined(r.Dir, append([]string{"fetch"}, opts...)...)
+		run := git.Combined
+		if asking {
+			run = git.Asking
+		}
+		out, err := run(r.Dir, args...)
 		return result{out, err}
-	})
+	}
+	needsCredentials := func(res result) bool { return res.err != nil && git.NeedsCredentials(string(res.out)) }
+	results := inTurns(repos, "to fetch", fetch, needsCredentials)
 	var failed []string
 	for i, res := range results {
 		out := strings.TrimRight(string(res.out), "\n")
