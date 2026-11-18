@@ -145,6 +145,13 @@ var interrupted atomic.Bool
 var interruptCh = make(chan struct{})
 
 func main() {
+	code := run(os.Args[1:])
+	ui.Reset()
+	os.Exit(code)
+}
+
+// catchSignals takes over Ctrl-C and the signals that ask pit to end, as interrupted describes.
+func catchSignals() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -161,9 +168,6 @@ func main() {
 			})
 		}
 	}()
-	code := run(os.Args[1:])
-	ui.Reset()
-	os.Exit(code)
 }
 
 type command struct {
@@ -204,7 +208,9 @@ var commands = map[string]command{
 	"each":    {run: cmdEach, checks: true, locks: true},
 }
 
+// run is pit's entry point, also for the tests, which run the test binary as pit.
 func run(args []string) int {
+	catchSignals()
 	args, color, err := colorOptions(args)
 	git.SetColor(ui.SetColor(color))
 	if err != nil {
