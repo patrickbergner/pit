@@ -46,6 +46,12 @@ func SetColor(mode string) string {
 	return mode
 }
 
+// ColorsOut reports whether stdout gets colors.
+func ColorsOut() bool { return colorOut }
+
+// Terminal reports whether f is a terminal.
+func Terminal(f *os.File) bool { return os.Getenv("TERM") != "dumb" && ansiTerminal(f) }
+
 // Reset undoes what SetColor changed in the terminal, before pit exits.
 func Reset() { resetTerminal() }
 

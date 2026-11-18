@@ -59,8 +59,8 @@ jobs:
           fi
 
       # One zip per platform holding pit-<version>/ with the binary under its
-      # plain name (pit or pit.exe) and the short readme. zip keeps the Unix
-      # executable bit.
+      # plain name (pit or pit.exe), the short readme and the license.
+      # zip keeps the Unix executable bit.
       - name: Package platform archives
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -82,6 +82,7 @@ jobs:
               chmod +x "staging/${platform}/${payload}/pit"
             fi
             cp dist-readme.txt "staging/${platform}/${payload}/readme.txt"
+            cp LICENSE "staging/${platform}/${payload}/LICENSE"
 
             archive="pit-${VERSION}-${platform}.zip"
             (cd "staging/${platform}" && zip -r -q "../../artifacts/${archive}" "${payload}")

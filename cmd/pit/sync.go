@@ -167,10 +167,11 @@ func clone(w *workspace.Workspace, r *workspace.Repo) error {
 		return fmt.Errorf("%s exists and is not empty, but is not a git repo; pit doesn't touch it", r.Path)
 	}
 
-	// in the root, as the clone: a relative URL means the same for both
-	refs, err := git.Output(w.Root, "ls-remote", "--heads", "--", r.Ext.URL)
+	// In the root, as the clone: a relative URL means the same for both. With the terminal, like the clone, so that git can ask for
+	// credentials where they can be entered.
+	refs, err := git.Prompting(w.Root, "ls-remote", "--heads", "--", r.Ext.URL)
 	if err != nil {
-		return err
+		return fmt.Errorf("git ls-remote %s failed", r.Ext.URL)
 	}
 	if refs == "" { // empty repo: clone it and start the configured branch
 		if err := git.Pass(w.Root, "clone", "--", r.Ext.URL, r.Path); err != nil {

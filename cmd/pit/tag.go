@@ -77,12 +77,15 @@ func cmdPushTag(w *workspace.Workspace, args []string) error {
 		if remote == "" {
 			return remoteTag{}
 		}
-		out, err := git.Remote(r.Dir, "ls-remote", "--tags", "--refs", remote, "refs/tags/"+name)
+		out, err := git.Output(r.Dir, "ls-remote", "--tags", "--refs", remote, "refs/tags/"+name)
 		return remoteTag{remote, out != "", err}
 	}) {
 		switch {
 		case rt.err != nil:
 			problems = append(problems, fmt.Sprintf("%s: %s", repos[i].Label(), rt.err))
+			if git.NeedsCredentials(rt.err.Error()) {
+				noteCredentials(repos[i])
+			}
 		case rt.has:
 			problems = append(problems, fmt.Sprintf("%s: %s already has a tag %s", repos[i].Label(), rt.remote, name))
 		}

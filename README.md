@@ -20,6 +20,13 @@ Download the zip for your platform from the releases and put `pit` anywhere on y
 
 pit needs `git` on `PATH`. On Windows, a `git.bat` or `git.cmd` shim is fine.
 
+**Shell completion** of commands, options, repo names (`-r`) and groups (`-g`): add the line for your shell to its startup file.
+
+```sh
+source <(pit completion bash)                              # ~/.bashrc, also for Git Bash
+pit completion powershell | Out-String | Invoke-Expression  # $PROFILE
+```
+
 ## Quick start
 
 1. Create `pit-externals.json` in the directory that should hold the repos:
@@ -93,12 +100,20 @@ owning those paths remain.
 | `pit tree` | The externals in the directory tree, with their sibling directories |
 | `pit status [--fetch]` | Branch, ahead/behind and changed files per repo |
 | `pit diff [<options>]` | The diffs of all repos, as one diff of the whole tree |
+| `pit grep [<options>] <pattern> [<path>...]` | Search the tracked files of all repos |
 | `pit add <path>...` / `pit add -A` | Stage, each path in the repo that owns it |
 | `pit restore [--staged] <path>...` | Unstage or discard changes, routed the same way |
-| `pit commit [-a] [-m <msg>]... [-F <file>] [-n]` | Commit in every repo with something to commit, all with the same message |
+| `pit rm [--recursive] [--cached] <path>...` | Remove files and stage that, routed the same way, once all repos pass git's checks |
+| `pit mv <source>... <destination>` | Move or rename files in the repo that owns them |
+| `pit commit [-a] [-m <msg>]... [-F <file>] [-n] [<path>...]` | Commit in every repo with something to commit, all with the same message |
 | `pit commit --continue` / `--abort` | Finish, or forget, a pit commit that stopped halfway |
 | `pit commit --amend [-a] [-m <msg> \| --no-edit]` | Amend the last pit commit |
-| `pit log [-n <count>] [--oneline]` | One log across all repos |
+| `pit revert [-m <msg> \| --no-edit] <commit>` | Revert a pit commit, as one new pit commit |
+| `pit stash [push \| pop \| apply \| drop \| list]` | Stash in every repo with changes, and bring back exactly those stashes |
+| `pit log [-n <count>] [--oneline] [<filters>]` | One log across all repos |
+| `pit show [<options>] [<commit>]` | A pit commit, with the changes of all its repos as one diff |
+| `pit graph [<log options>] [<revision>...] [-- <path>...]` | The history of the repo you are in, as `git log --graph` draws it |
+| `pit changes <commit> [<revision>] [-- <path>...]` | The files a commit changed, or that differ between it and another revision |
 | `pit fetch` | Fetch all repos |
 | `pit pull` | Pull all repos that have an upstream |
 | `pit push [-n] [-i \| -y]` | Show what each repo would push, new tags included, ask repo by repo, then push |
@@ -106,6 +121,7 @@ owning those paths remain.
 | `pit tag -r <repo> <name>` | Tag HEAD of the selected repos |
 | `pit pushtag [-i \| -y] -r <repo> <name>` | Tag, then push as `pit push` does |
 | `pit each [--] <git args>` | Run any git command in each repo |
+| `pit completion bash \| powershell` | Print the script for [shell completion](#installation) |
 | `pit version` | Show the version |
 
 - **Git options.** Options pit doesn't know are passed on to git: `pit diff --staged`, `pit pull --rebase`,
@@ -113,8 +129,14 @@ owning those paths remain.
   use the long form of git options with those letters (`pit pull --rebase`, not `-r`).
 - **Help.** `-h` or `--help` after any command but `each` shows pit's help.
 - **Paths** in output are relative to the current directory, as git prints them.
-- **Order and locking.** `status`, `log` and `fetch` work on the repos in parallel. Everything that changes something runs repo by repo,
-  in config order, root last, and holds a lock (`.pit/lock`) so two pit commands don't interleave.
+- **Order and locking.** `status`, `log`, `grep` and `fetch` work on the repos in parallel. Everything that changes something runs repo by
+  repo, in config order, root last, and holds a lock (`.pit/lock`) so two pit commands don't interleave.
+- **Credentials.** git asks for them where you can answer: in `pull`, `push`, `sync` and everything else whose git output you see as it
+  comes. Where git runs in the background, as in `fetch` and `status --fetch`, it can't ask, and fails at once instead of waiting for
+  an answer nobody can give; pit says where to enter them. This covers git's own prompts and Git Credential Manager, the credential
+  helper of Git for Windows (`GCM_INTERACTIVE=never`).
+- **Ctrl-C** stops before the next repo, once the git that runs has stopped too. A git that keeps waiting, for example for credentials in
+  a window you don't see, is ended by a second Ctrl-C, together with what it started; pit then stops as after any other failure.
 
 ### Output and colors
 
@@ -134,18 +156,23 @@ Fast-forward
 
 ```
 
-`diff` and `log` stay one diff and one log of the whole tree. `add` and `restore` are silent and use blocks only with `-p` / `-i`, when
-git asks hunk by hunk.
+`diff`, `log` and `show` stay one diff and one log of the whole tree. `add` and `restore` are silent and use blocks only with `-p` /
+`-i`, when git asks hunk by hunk.
 
 Output to a terminal is lightly colored. `NO_COLOR` set to anything turns that off; `--color[=always|never|auto]` or `--no-color`,
 before or after the command, decides it either way, also for the git output pit shows (`pit --color diff | less -R`).
+
+**Pager.** In a terminal, `diff`, `grep`, `log` and `show` page their output, as git does: with the pager git would use (`GIT_PAGER`,
+`core.pager`, `PAGER`, else `less`), run through the shell, with `LESS=FRX` unless `LESS` is set. On Windows, pit finds the shell and
+`less` in the Git for Windows installation git comes from. `--no-pager`, before or after the command, prints straight to the terminal; a
+pager of `cat` does the same.
 
 ### `pit sync`
 
 For each external:
 
 - **Directory missing or empty:** cloned, with the configured branch checked out. An empty remote repo is cloned too, with that branch
-  started.
+  started. git may ask for credentials there, under the external's header, before cloning: pit first looks at the remote's branches.
 - **Already a git repo:** pit checks that `origin` is the configured URL (`https://`, `ssh://` and `git@host:path` spellings and a
   trailing `.git` don't matter) and warns if not. Nothing is changed.
 - **Exists, but isn't empty and isn't a repo:** an error for this external. pit never overwrites or adopts content.
@@ -190,7 +217,41 @@ Ahead/behind are as of the last fetch; `--fetch` fetches first. pit says so when
 
 Runs `git diff` in every repo with each repo's location in the paths (`a/libs/core/README.md`), so the output reads as one diff of the
 whole tree. Diff options are passed on (`--staged`, `--exit-code`, ...). Options that list files instead of a patch (`--stat`,
-`--name-only`, `--name-status`, ...) give a block per repo, as git prints those paths relative to the repo. pit starts no pager.
+`--name-only`, `--name-status`, ...) give a block per repo, as git prints those paths relative to the repo.
+
+### `pit grep`
+
+Runs `git grep` in all repos at once: `pit grep -n "TODO" libs`. The first argument is the pattern, unless `-e` gives the patterns
+(`pit grep -e foo -e bar`); further arguments are paths, routed as everywhere. git grep's options are passed on (`-i`, `-w`, `-l`,
+`--untracked`, ...), with their values in the same argument (`-A3`). As git prints the paths relative to the repo, each repo with matches
+gets a block. Like git grep, pit grep fails if nothing matches anywhere.
+
+### `pit rm`
+
+Runs `git rm` for each path in the repo that owns it, so each removal is staged where it belongs: `pit rm libs/core/old.go notes.md`.
+
+- **Checked first.** In one repo, git rm removes nothing if one of its paths fails git's checks: a path that matches nothing, a file with
+  changes that aren't committed, a directory without `-r`. pit extends that to all repos: it runs `git rm --dry-run` in each first, and if
+  one fails, it shows git's reasons and removes nothing anywhere.
+- **`--recursive`** removes directories. It is git rm's `-r`, which has no long form, while `-r` selects repos in pit. Other options go to
+  git: `--cached` only untracks the files and keeps them, `-f` removes files with changes, `-n` only shows what would be removed, `-q`
+  doesn't list it.
+- **Files, not externals.** A path that is an external's directory or contains externals would remove everything in them, so pit refuses
+  it. To drop an external, remove it from `pit-externals.json` and run `pit sync`.
+- git rm lists the removed files relative to its repo, so each repo gets a block.
+
+### `pit mv`
+
+Runs `git mv` in the repo that owns the paths, with the paths as that repo sees them, so `pit mv libs/core/old.go libs/core/new.go` works
+from anywhere in the tree. Options go to git: `-f`, `-k`, `-n`, `-v`.
+
+- **Within one repo.** A move has one destination, so the sources and the destination must belong to the same repo; git can't move files
+  between repos. For that, move the files yourself and stage both sides: `pit add libs/core/util.go libs/util/util.go` stages the removal
+  in `core` and the new file in `util`. The history stays behind in `core`.
+- **Files, not externals.** To move an external, change its `path` in `pit-externals.json`, move its directory and run `pit sync`. A
+  directory holding externals is refused too: git mv renames it as a whole, clones included, and the config would no longer match.
+- pit reports all problems at once and then moves nothing. git mv itself checks every source before it moves any.
+- git mv is silent; with `-v` or `-n`, its list of moves comes in a block for the repo.
 
 ### `pit commit`
 
@@ -202,6 +263,10 @@ One message, one commit per repo:
 3. **Message** from `-m` (several are joined as paragraphs), `-F <file>`, or git's editor, opened once with the changes of every repo.
 4. **Commit** in each repo, one after the other, root last. Each repo's hooks run as usual; `-n` (`--no-verify`) skips them.
 
+**Paths** commit just those, as `git commit <paths>` does: their changes, staged or not, in the repos owning them, while other staged
+changes stay staged. `pit commit -m "Fix the parser" libs/core/parse.go app/main.go` commits in `core` and `app`; a directory covers the
+externals below it. A path git doesn't know, such as a new file, is refused up front; `pit add` it first.
+
 The commits are independent: nothing links them besides message, author and time, and there is no cross-repo atomicity. If a commit
 fails halfway, typically because of a hook, pit stops and lists what was committed and what wasn't. Then:
 
@@ -211,6 +276,29 @@ fails halfway, typically because of a hook, pit stops and lists what was committ
 **Amending.** `pit commit --amend` amends the commits of the last pit commit, offering their message in the editor (or use `-m`, or
 `--no-edit`). Repos with newly staged changes get a fresh commit with the same message. pit refuses if one of the repos has moved on
 since or the commit is already pushed there. To amend anything else, use git in that repo.
+
+### `pit revert`
+
+Reverts a pit commit as one new pit commit: `pit revert 1a2b3c4`, with a commit of any of its repos, as `pit log` shows them. pit finds
+the commits that belong with it in the other repos, the way `pit log` groups them, then runs `git revert --no-commit` and commits in
+each, all with the same message: as git words it, `Revert "<subject>"`, with each repo's reverted commit, in the editor unless `-m`, `-F`
+or `--no-edit` decide it. `-r` and `-g` limit the revert to some of the repos.
+
+Every repo must be clean, on a branch and in no operation; merge commits are refused, as they need `git revert -m`. It is a pit commit
+like any other: if a revert conflicts, pit stops there; resolve the conflicts and `git add` the files in that repo, then
+`pit commit --continue` commits it and reverts the rest. `pit commit --amend` amends it.
+
+### `pit stash`
+
+`pit stash [push] [-m <msg>] [-u] [<path>...]` runs `git stash push` in each repo with changes and records which repos it stashed in, in
+`.pit/`, as one pit stash. `pit stash pop` brings back exactly those stashes, whatever else is stashed in the repos. Options go to git;
+paths limit the stash, as with git. `-u` stashes untracked files too; `--all` is refused, as the ignored files it would stash include the
+clones of externals and pit's `.pit/`.
+
+- `pit stash list` shows the pit stashes, newest first, numbered from 0, each with its message and repos.
+- `pit stash pop`, `apply` and `drop` use the newest pit stash, or the one with the given number: `pit stash pop 1`.
+- A stash popped or dropped with git since is left out with a warning. If git can't pop a stash, typically because of a conflict, pit
+  stops there and keeps the rest of the pit stash for the next `pit stash pop`; git keeps that repo's stash, as always.
 
 ### `pit log`
 
@@ -227,6 +315,58 @@ Date:   Sat Nov 14 10:23:45 2026 +0100
 Commits in different repos with the same author and message, made within ten minutes of each other, are one entry: what `pit commit`
 produced. The grouping comes from the histories alone, so it is the same on every machine and for commits made with git. `--oneline`
 shows one line per entry; paths narrow the log, as with `git log -- <path>`.
+
+**Filters.** The git log options that choose commits are passed on, with their values in the same argument: `--author=`,
+`--committer=`, `--since=` / `--after=`, `--until=` / `--before=`, `--grep=` (with `--all-match`, `--invert-grep`, `-i`, `-E`, `-F`,
+`-P`), `-S<string>`, `-G<regex>`, `--diff-filter=`, `--merges`, `--no-merges`, `--min-parents=`, `--max-parents=`, `--first-parent` and
+`--follow`. Options that change git's output, like `--stat` or `--format`, are refused, as pit reads that output itself; `pit show`
+shows a commit's changes.
+
+```sh
+pit log --oneline --author=me --since=1.week
+```
+
+### `pit show`
+
+Shows a pit commit: its entry as `pit log` shows it, then the changes of all its repos as one diff with each repo's location in the
+paths, as `pit diff` prints them. Without an argument, it is the newest one; `pit show 1a2b3c4` shows the one that commit of any repo is
+part of. A commit name like `HEAD` that resolves in several repos needs `-r` (`pit show -r core HEAD~1`); `-r` and `-g` also limit the
+repos shown. Diff options are passed on, and those that list files (`--stat`, `--name-only`, ...) give a block per repo.
+
+### `pit graph`, `pit changes`
+
+These two show the history of a single repo: the one the current directory is in (an external, or the root repo outside of them), or
+the ones `-r` and `-g` select, each in a block. Their arguments are git's, in git's order: options and revisions, then `--` and paths,
+relative to the current directory as everywhere.
+
+`pit graph` draws the history as `git log --graph --decorate --oneline` does, with git's colors for the branch lines, branch names and
+tags. Options go to git: `--all` for every branch, `-n 30`, `--author=...`, `main..feature/x`; `--format=` or `--pretty=` replace the
+one-line default.
+
+```
+$ cd libs/core && pit graph --all
+─── core (libs/core) ───────────────────────────────────────────────────────────
+*   3c4d5e6 (HEAD -> main, origin/main) Merge branch 'feature/x'
+|\
+| * 2b3c4d5 (feature/x) Add the x parser
+|/
+* 1a2b3c4 Initial commit
+```
+
+`pit changes <commit>` lists the files a commit changed, compared with the commit before it: the first parent of a merge, nothing for
+a repo's first commit. `pit changes <commit> <revision>` lists the files that differ between the two, as in `pit changes 1a2b3c4 HEAD`.
+Names like `HEAD~2` or `main` are the repo's you are in; a commit hash found only in another repo is taken from there. The list shows
+git's letters (`A`dded, `M`odified, `D`eleted, `R`enamed with `old -> new`) with paths relative to the current directory; `--stat`,
+`--numstat`, `--name-only` or `-p` show git's own output instead.
+
+```
+$ pit changes 3c4d5e6
+─── core (libs/core) ───────────────────────────────────────────────────────────
+from 1a2b3c4 Initial commit
+to   3c4d5e6 Merge branch 'feature/x'
+  A parser/x.go
+  M README.md
+```
 
 ### `pit fetch`, `pit pull`
 
@@ -442,11 +582,12 @@ pit keeps a few files in `.pit/` next to `pit-externals.json`, local to your che
 | `COMMIT_EDITMSG` | The message of the latest pit commit; survives a failed commit for `--continue` |
 | `commit-in-progress.json` | Which repos of an interrupted pit commit are done, and which are still to do |
 | `last-commit.json` | The commits of the last pit commit, for `--amend` |
+| `stash.json` | Which stash of which repo each pit stash is |
 | `lock` | Held while a command changes something |
 
-Deleting `.pit` loses at most an interrupted commit's progress and the ability to amend the last pit commit through pit. Since you may
-use git directly at any time, pit checks what it recorded against the repos before acting on it. A `lock` left behind by a pit that was
-killed can simply be deleted.
+Deleting `.pit` loses at most an interrupted commit's progress, the ability to amend the last pit commit through pit, and which stashes
+belong to which pit stash; the stashes themselves stay in the repos. Since you may use git directly at any time, pit checks what it
+recorded against the repos before acting on it. A `lock` left behind by a pit that was killed can simply be deleted.
 
 ## What pit deliberately doesn't do
 

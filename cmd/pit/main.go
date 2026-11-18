@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/patrickbergner/pit/internal/git"
 	"github.com/patrickbergner/pit/internal/ui"
@@ -49,6 +50,9 @@ Colors (default: on in a terminal, off if NO_COLOR is set):
   --color[=<when>]          always, never or auto; also for git's output
   --no-color                Same as --color=never
 
+Paging (diff, grep, log, show; default: in a terminal, with git's pager):
+  --no-pager                Print straight to the terminal
+
 Setup:
   sync                      Clone missing externals, check the others, and
                             keep them out of the repos holding them (the
@@ -60,18 +64,48 @@ Setup:
 Changes:
   status [--fetch]          Branch, ahead/behind and changed files per repo
   diff [<git diff options>] Diffs of all repos, paths relative to the root
+  grep [<git grep options>] <pattern> [<path>...]
+                            Search the tracked files of all repos
   add <path>... | -A | -u   Stage, each path in the repo that owns it
   restore [--staged] <path>...
                             Unstage or discard, routed the same way
-  commit [-a] [-m <msg>]... [-F <file>] [-n]
+  rm [--recursive] [--cached] <path>...
+                            Remove files, routed the same way, once all
+                            repos pass git's checks (--recursive is git
+                            rm's -r, as -r selects repos)
+  mv <source>... <destination>
+                            Move or rename files in the repo that owns them;
+                            between repos, move them yourself and pit add
+                            both paths
+  commit [-a] [-m <msg>]... [-F <file>] [-n] [<path>...]
                             Commit in every repo with staged changes (-a:
-                            with tracked changes), all with the same message
+                            with tracked changes; paths: just those), all
+                            with the same message
   commit --continue | --abort
                             Finish or forget a pit commit that stopped halfway
   commit --amend [-a] [-m <msg>]
                             Amend the last pit commit in all its repos
-  log [-n <count>] [--oneline]
+  revert [-m <msg>] [--no-edit] <commit>
+                            Revert the pit commit that <commit> is part of,
+                            as one new pit commit
+  stash [push] [-m <msg>] [-u] [<path>...]
+                            Stash in every repo with changes, as one pit stash
+  stash pop | apply | drop [<n>]
+                            Use the pit stash <n> (default 0, the newest) in
+                            exactly the repos it stashed in
+  stash list                The pit stashes, newest first
+  log [-n <count>] [--oneline] [--author=<who>] [--since=<when>] ...
                             One log across all repos; a pit commit is one entry
+  show [<git diff options>] [<commit>]
+                            The pit commit that <commit> is part of (default:
+                            the newest), as one diff of all its repos
+
+History of the repo you are in (or the ones -r and -g select):
+  graph [<git log options>] [<revision>...] [-- <path>...]
+                            The history as git log --graph draws it
+  changes [<options>] <commit> [<revision>] [-- <path>...]
+                            The files <commit> changed, or that differ between
+                            <commit> and <revision> (HEAD, a branch, ...)
 
 Remotes:
   fetch [<git fetch options>]
@@ -91,6 +125,8 @@ Tags:
 
 Anything else:
   each [--] <git args>      Run a git command in each repo
+  completion bash | powershell
+                            Print the script for completion in that shell
   version                   Show the pit version
 
 Options pit doesn't know go to git, e.g. pit diff --staged,
@@ -101,7 +137,8 @@ pit pull --rebase, pit push --force-with-lease.
 var errSilent = errors.New("")
 
 // interrupted is set on Ctrl-C, and when pit is asked to end or its terminal closes. The git process running at that moment gets the signal
-// too and stops; pit then stops before the next repo and gives its lock back.
+// too and stops; pit then stops before the next repo and gives its lock back. A git that doesn't stop, such as one waiting for credentials
+// that are asked for where nobody sees it, is ended by the second Ctrl-C, together with what it started.
 var interrupted atomic.Bool
 
 // interruptCh is closed on the first such signal, ending a pending question.
@@ -112,9 +149,16 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		for range sig {
-			if !interrupted.Swap(true) {
-				close(interruptCh)
+			if interrupted.Swap(true) {
+				git.Abort()
+				continue
 			}
+			close(interruptCh)
+			time.AfterFunc(time.Second, func() {
+				if git.Running() {
+					ui.Note("git is still running; if it waits for something, such as credentials, Ctrl-C again stops it")
+				}
+			})
 		}
 	}()
 	code := run(os.Args[1:])
@@ -130,6 +174,8 @@ type command struct {
 	locks bool
 	// listsMissing: the command shows the externals that aren't cloned itself
 	listsMissing bool
+	// pages: the command's output goes through a pager when stdout is a terminal
+	pages bool
 }
 
 var commands = map[string]command{
@@ -137,11 +183,19 @@ var commands = map[string]command{
 	"list":    {run: cmdList},
 	"tree":    {run: cmdTree},
 	"status":  {run: cmdStatus, checks: true, listsMissing: true},
-	"diff":    {run: cmdDiff, checks: true},
+	"diff":    {run: cmdDiff, checks: true, pages: true},
+	"grep":    {run: cmdGrep, checks: true, pages: true},
 	"add":     {run: cmdAdd, checks: true, locks: true},
 	"restore": {run: cmdRestore, checks: true, locks: true},
+	"rm":      {run: cmdRm, checks: true, locks: true},
+	"mv":      {run: cmdMv, checks: true, locks: true},
 	"commit":  {run: cmdCommit, checks: true, locks: true},
-	"log":     {run: cmdLog, checks: true},
+	"revert":  {run: cmdRevert, checks: true, locks: true},
+	"stash":   {run: cmdStash, checks: true, locks: true},
+	"log":     {run: cmdLog, checks: true, pages: true},
+	"show":    {run: cmdShow, checks: true, pages: true},
+	"graph":   {run: cmdGraph, checks: true, pages: true},
+	"changes": {run: cmdChanges, checks: true, pages: true},
 	"fetch":   {run: cmdFetch, checks: true},
 	"pull":    {run: cmdPull, checks: true, locks: true},
 	"push":    {run: cmdPush, checks: true, locks: true},
@@ -157,6 +211,7 @@ func run(args []string) int {
 		ui.Error("%s", err)
 		return 1
 	}
+	args, noPager := pagerOption(args)
 	name := "help"
 	if len(args) > 0 {
 		name, args = args[0], args[1:]
@@ -167,6 +222,15 @@ func run(args []string) int {
 		return 0
 	case "version", "--version":
 		fmt.Println("pit", pitVersion())
+		return 0
+	case "completion":
+		if err := cmdCompletion(args); err != nil {
+			ui.Error("%s", err)
+			return 1
+		}
+		return 0
+	case "__complete":
+		complete(args)
 		return 0
 	}
 	if name != "each" && wantsHelp(args) { // each's arguments are git's
@@ -179,6 +243,7 @@ func run(args []string) int {
 		fmt.Fprint(os.Stderr, "\n"+usage)
 		return 1
 	}
+	c.pages = c.pages && !noPager
 	if err := runCommand(c, args); err != nil {
 		if !errors.Is(err, errSilent) {
 			ui.Error("%s", err)
@@ -221,7 +286,22 @@ func colorOptions(args []string) (rest []string, color string, err error) {
 	return rest, color, nil
 }
 
-func runCommand(c command, args []string) error {
+// pagerOption takes --no-pager out of args, wherever it comes before a "--", as colorOptions does with the color options.
+func pagerOption(args []string) (rest []string, noPager bool) {
+	for i, a := range args {
+		switch a {
+		case "--":
+			return append(rest, args[i:]...), noPager
+		case "--no-pager":
+			noPager = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, noPager
+}
+
+func runCommand(c command, args []string) (err error) {
 	if _, err := git.Path(); err != nil {
 		return err
 	}
@@ -232,6 +312,16 @@ func runCommand(c command, args []string) error {
 	w, err := workspace.Open(cwd)
 	if err != nil {
 		return err
+	}
+	if c.pages {
+		if p := startPager(w.Root); p != nil {
+			// The checks' warnings go to the pager too, like everything else. Quitting it early is no failure, as with git.
+			defer func() {
+				if p.stop() {
+					err = nil
+				}
+			}()
+		}
 	}
 	if c.checks {
 		check(w, !c.listsMissing)
@@ -266,9 +356,9 @@ func check(w *workspace.Workspace, uncloned bool) {
 	}
 }
 
-// stopped reports a Ctrl-C, for loops over repos.
+// stopped reports a Ctrl-C, or that the pager was quit, for loops over repos.
 func stopped() error {
-	if interrupted.Load() {
+	if interrupted.Load() || pagerQuit.Load() {
 		return errors.New("interrupted")
 	}
 	return nil

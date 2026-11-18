@@ -4,6 +4,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Path returns the git executable pit runs, resolved once.
@@ -70,6 +73,30 @@ func SetColor(mode string) {
 	}
 }
 
+// pagerEnv tells git that what it prints goes to a pager, as git's own pager does, so that it colors its output as for a terminal.
+var pagerEnv []string
+
+// SetPagerInUse tells git that the output pit shows goes through a pager.
+func SetPagerInUse() { pagerEnv = []string{"GIT_PAGER_IN_USE=true"} }
+
+// noPrompts keeps git from asking for anything in the runs whose output pit captures, where a prompt could neither be seen nor answered
+// and git would wait forever. GIT_TERMINAL_PROMPT covers git's own prompts, not credential helpers; Git Credential Manager, the helper of
+// Git for Windows, has a switch of its own, without which it opens a prompt or window nobody sees. Either way git fails at once instead.
+var noPrompts = []string{"GIT_TERMINAL_PROMPT=0", "GCM_INTERACTIVE=never"}
+
+// Every git process pit runs belongs to abortCtx, which Abort cancels.
+var abortCtx, abortRuns = context.WithCancel(context.Background())
+
+// running counts the git processes running.
+var running atomic.Int32
+
+// Abort ends the git processes running, and any started from now on, together with the processes they started, such as a credential
+// helper waiting for an answer. It is for a second Ctrl-C, when the first one didn't end them.
+func Abort() { abortRuns() }
+
+// Running reports whether a git process is running.
+func Running() bool { return running.Load() > 0 }
+
 // command builds git args run in dir ("" for the current directory) with env added to ours. shown is for commands whose output pit shows,
 // which follow pit's coloring.
 func command(dir string, env []string, args []string, shown bool) (*exec.Cmd, error) {
@@ -79,8 +106,12 @@ func command(dir string, env []string, args []string, shown bool) (*exec.Cmd, er
 	}
 	if shown {
 		args = append(append([]string(nil), colorArgs...), args...)
+		env = append(slices.Clone(env), pagerEnv...)
 	}
-	cmd := exec.Command(bin, args...)
+	cmd := exec.CommandContext(abortCtx, bin, args...)
+	cmd.Cancel = func() error { return killTree(cmd.Process) }
+	// Capturing git's output doesn't wait for a process git started that keeps the output open after git has ended, as a daemon may.
+	cmd.WaitDelay = time.Second
 	cmd.Dir = dir
 	cmd.Env = append(baseEnv(), env...)
 	if dir != "" {
@@ -114,28 +145,45 @@ var environ = sync.OnceValue(func() []string {
 // baseEnv returns a copy of environ to add to.
 func baseEnv() []string { return slices.Clone(environ()) }
 
-// Raw runs git in dir with stdin (may be nil) and returns its stdout.
+// run runs cmd and waits for it.
+func run(cmd *exec.Cmd) error {
+	running.Add(1)
+	defer running.Add(-1)
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil // git succeeded; something it started still holds its output
+	}
+	return err
+}
+
+// Raw runs git in dir with stdin (may be nil) and returns its stdout. git can't ask for anything (see noPrompts); that goes for all the
+// runners that capture stderr: Raw, Output, Input, OK and Combined.
 func Raw(dir string, stdin io.Reader, args ...string) ([]byte, error) {
-	return raw(dir, nil, stdin, args)
-}
-
-// Remote is Output for commands that reach a remote, possibly in parallel: interactive credential prompts are disabled, as for Combined.
-func Remote(dir string, args ...string) (string, error) {
-	out, err := raw(dir, []string{"GIT_TERMINAL_PROMPT=0"}, nil, args)
-	return strings.TrimRight(string(out), "\n"), err
-}
-
-func raw(dir string, env []string, stdin io.Reader, args []string) ([]byte, error) {
-	cmd, err := command(dir, env, args, false)
+	cmd, err := command(dir, noPrompts, args, false)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, &out, &errb
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return out.Bytes(), &Error{args, errb.String(), err}
 	}
 	return out.Bytes(), nil
+}
+
+// Prompting is Output for commands that may have to ask, such as for credentials: stdin and stderr are pit's own, so that git's prompts
+// show and can be answered, and only stdout is captured.
+func Prompting(dir string, args ...string) (string, error) {
+	cmd, err := command(dir, nil, args, false)
+	if err != nil {
+		return "", &Error{args, "", err}
+	}
+	var out bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, &out, os.Stderr
+	if err := run(cmd); err != nil {
+		return "", &Error{args, "", err}
+	}
+	return strings.TrimRight(out.String(), "\n"), nil
 }
 
 // Output runs git in dir and returns its stdout without trailing newlines.
@@ -156,19 +204,24 @@ func OK(dir string, args ...string) bool {
 	return err == nil
 }
 
-// Combined runs git in dir without a terminal: no stdin, interactive credential prompts disabled, stdout and stderr captured together. It
-// is for commands that run in parallel, whose output is printed afterwards.
+// Combined runs git in dir without a terminal: no stdin, no prompts (see noPrompts), stdout and stderr captured together. It is for
+// commands that run in parallel, whose output is printed afterwards.
 func Combined(dir string, args ...string) ([]byte, error) {
-	cmd, err := command(dir, []string{"GIT_TERMINAL_PROMPT=0"}, args, true)
+	cmd, err := command(dir, noPrompts, args, true)
 	if err != nil {
 		return nil, &Error{args, "", err}
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return out.Bytes(), &Error{args, "", err}
 	}
 	return out.Bytes(), nil
+}
+
+// NeedsCredentials reports whether git's message says that it failed for want of credentials it couldn't ask for (see noPrompts).
+func NeedsCredentials(msg string) bool {
+	return strings.Contains(msg, "terminal prompts disabled") || strings.Contains(msg, "user interactivity has been disabled")
 }
 
 // Pass runs git in dir attached to the terminal: stdin, stdout and stderr are pit's own.
@@ -178,7 +231,7 @@ func Pass(dir string, args ...string) error {
 		return err
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return &Error{args, "", err}
 	}
 	return nil

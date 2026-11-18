@@ -16,6 +16,9 @@ import (
 
 func TestMain(m *testing.M) {
 	if os.Getenv("PIT_TEST_AS_PIT") == "1" {
+		if os.Getenv("PIT_TEST_TERMINAL") == "1" { // as if stdout were a terminal, for the pager
+			stdoutTerminal = func() bool { return true }
+		}
 		os.Exit(run(os.Args[1:]))
 	}
 	os.Exit(m.Run())

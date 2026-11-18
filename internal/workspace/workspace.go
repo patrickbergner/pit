@@ -301,28 +301,27 @@ type Target struct {
 func (w *Workspace) Route(paths []string) ([]Target, error) {
 	specs, shared := map[*Repo][]string{}, map[*Repo][]string{}
 	for _, p := range paths {
-		rel, err := w.rootRel(p)
+		l, err := w.Locate(p)
 		if err != nil {
 			return nil, err
 		}
-		owner, spec := w.owner(rel)
-		if owner != nil {
-			if !owner.Cloned() {
-				return nil, fmt.Errorf("%s: %s is not cloned yet; run pit sync", p, owner.Name)
+		if l.Owner != nil {
+			if !l.Owner.Cloned() {
+				return nil, fmt.Errorf("%s: %s is not cloned yet; run pit sync", p, l.Owner.Name)
 			}
-			specs[owner] = append(specs[owner], spec)
+			specs[l.Owner] = append(specs[l.Owner], l.Spec)
 		}
 		below := false
-		for _, r := range w.Externals {
-			if r.Cloned() && (rel == "." || hasPathPrefix(r.Path, rel)) {
+		for _, r := range l.Below {
+			if r.Cloned() {
 				specs[r] = append(specs[r], ".")
 				below = true
 			}
 		}
 		switch {
-		case owner != nil && below:
-			shared[owner] = append(shared[owner], spec)
-		case owner == nil && !below:
+		case l.Owner != nil && below:
+			shared[l.Owner] = append(shared[l.Owner], l.Spec)
+		case l.Owner == nil && !below:
 			return nil, fmt.Errorf("%s: not inside any repo of %s", p, w.Root)
 		}
 	}
@@ -333,6 +332,30 @@ func (w *Workspace) Route(paths []string) ([]Target, error) {
 		}
 	}
 	return targets, nil
+}
+
+// Location is where a path lies in the tree.
+type Location struct {
+	Owner *Repo   // the repo owning it, the innermost external containing it or else the root repo; nil if there is none
+	Spec  string  // the path inside Owner, "." for its top directory
+	Below []*Repo // the externals strictly below it, cloned or not; all of them for the root
+}
+
+// Locate tells where a path given on the command line (relative to the current directory) lies, for one path at a time where Route merges
+// them per repo.
+func (w *Workspace) Locate(p string) (Location, error) {
+	rel, err := w.rootRel(p)
+	if err != nil {
+		return Location{}, err
+	}
+	var l Location
+	l.Owner, l.Spec = w.owner(rel)
+	for _, r := range w.Externals {
+		if rel == "." || hasPathPrefix(r.Path, rel) {
+			l.Below = append(l.Below, r)
+		}
+	}
+	return l, nil
 }
 
 // rootRel turns a command-line path into a slash path relative to the root ("." for the root itself).

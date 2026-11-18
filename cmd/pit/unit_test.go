@@ -183,3 +183,33 @@ func TestParentsFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletions(t *testing.T) {
+	names, groups := []string{"a", "b", "."}, []string{"libs"}
+	for _, c := range []struct {
+		cur    string
+		before []string
+		want   []string
+	}{
+		{"st", nil, []string{"stash", "status"}},
+		{"--no-c", nil, []string{"--no-color"}},
+		{"", []string{"status", "-r"}, []string{".", "a", "b"}},
+		{"l", []string{"log", "--group"}, []string{"libs"}},
+		{"--a", []string{"commit"}, []string{"--abort", "--all", "--amend"}},
+		{"", []string{"stash"}, []string{"apply", "drop", "list", "pop", "push"}},
+		{"", []string{"completion"}, []string{"bash", "powershell"}},
+		{"--no-p", []string{"log"}, []string{"--no-pager"}},
+		{"--no-p", []string{"status"}, nil},
+		{"", []string{"add"}, nil}, // file names, from the shell
+		{"x", []string{"each", "--"}, nil},
+	} {
+		if got := completions(c.cur, c.before, names, groups); !slices.Equal(got, c.want) {
+			t.Errorf("completions(%q, %q) = %q, want %q", c.cur, c.before, got, c.want)
+		}
+	}
+	for name := range commands {
+		if _, ok := commandOptions[name]; !ok {
+			t.Errorf("commandOptions lacks %s", name)
+		}
+	}
+}

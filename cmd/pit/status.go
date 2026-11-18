@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,13 @@ func repos(targets []workspace.Target) []*workspace.Repo {
 		rs[i] = t.Repo
 	}
 	return rs
+}
+
+// eachTarget runs f for each target as workspace.Parallel does for repos, and returns the results in the targets' order. Targets have a
+// repo each.
+func eachTarget[T any](targets []workspace.Target, f func(workspace.Target) T) []T {
+	rs := repos(targets)
+	return workspace.Parallel(rs, func(r *workspace.Repo) T { return f(targets[slices.Index(rs, r)]) })
 }
 
 // notes lists what is unusual about a repo's state.

@@ -13,6 +13,12 @@ import (
 	"github.com/patrickbergner/pit/internal/workspace"
 )
 
+// noteCredentials tells where git can ask for the credentials it wanted in r but couldn't ask for, as it ran in parallel with others.
+func noteCredentials(r *workspace.Repo) {
+	ui.Note("%s: git needs credentials there, which it can't ask for while pit runs it in parallel; git fetch in %s asks for them",
+		r.Label(), r.Dir)
+}
+
 // fetchAll fetches the repos in parallel. Afterwards, each repo that printed something gets a block with it; quiet shows only failures.
 func fetchAll(repos []*workspace.Repo, opts []string, quiet bool) error {
 	type result struct {
@@ -39,6 +45,9 @@ func fetchAll(repos []*workspace.Repo, opts []string, quiet bool) error {
 			fmt.Println(out)
 		} else {
 			ui.Error("%s", res.err)
+		}
+		if git.NeedsCredentials(out) {
+			noteCredentials(repos[i])
 		}
 		ui.End()
 	}
@@ -221,6 +230,9 @@ func pushRepos(w *workspace.Workspace, p *parsed, repos []*workspace.Repo) ([]pu
 		nt := tags[r]
 		if nt.err != nil {
 			ui.Warn("%s: can't tell which tags %s lacks, so none are pushed: %s", r.Label(), nt.remote, nt.err)
+			if git.NeedsCredentials(nt.err.Error()) {
+				noteCredentials(r)
+			}
 		}
 		if len(nt.elsewhere) > 0 {
 			ui.Note("%s: not pushing %s, not on %s", r.Label(), tagList(nt.elsewhere, func(s string) string { return s }), s.Branch)
@@ -451,7 +463,7 @@ func lookupNewTags(s repoStatus) newTags {
 	if nt.remote == "" {
 		return newTags{}
 	}
-	out, err := git.Remote(r.Dir, "ls-remote", "--tags", "--refs", nt.remote)
+	out, err := git.Output(r.Dir, "ls-remote", "--tags", "--refs", nt.remote)
 	if err != nil {
 		nt.err = err
 		return nt

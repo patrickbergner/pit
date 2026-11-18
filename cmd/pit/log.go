@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 type logCommit struct {
 	repo        *workspace.Repo
+	hash        string
 	short       string
 	committed   time.Time
 	date        string // the author date as git log shows it
@@ -31,6 +33,35 @@ type logEntry struct {
 
 var countFlag = regexp.MustCompile(`^-[0-9]+$`)
 
+// logFilters are the git log options that pit log passes on, and whether each takes a value. They choose commits and leave git's output
+// alone, which pit reads itself.
+var logFilters = map[string]bool{
+	"--author": true, "--committer": true, "--since": true, "--after": true, "--until": true, "--before": true, "--grep": true,
+	"--all-match": false, "--invert-grep": false, "-i": false, "--regexp-ignore-case": false, "-E": false, "--extended-regexp": false,
+	"-F": false, "--fixed-strings": false, "-P": false, "--perl-regexp": false, "--no-merges": false, "--merges": false,
+	"--min-parents": true, "--max-parents": true, "--first-parent": false, "-S": true, "-G": true, "--pickaxe-regex": false,
+	"--diff-filter": true, "--follow": false,
+}
+
+// checkLogFilter tells why pit log can't pass the option o on to git log, if it can't.
+func checkLogFilter(o string) error {
+	name, _, hasValue := strings.Cut(o, "=")
+	if !strings.HasPrefix(o, "--") && len(o) > 2 { // -Sfoo
+		name, hasValue = o[:2], true
+	}
+	takesValue, ok := logFilters[name]
+	switch {
+	case !ok:
+		return fmt.Errorf("log: pit log takes only git log options that choose commits (--author=, --since=, --grep=, --no-merges, ...), "+
+			"as it reads git's output itself; %s isn't one", name)
+	case takesValue && !hasValue && strings.HasPrefix(name, "--"):
+		return fmt.Errorf("log: give %s its value in the same argument (%s=<value>)", name, name)
+	case takesValue && !hasValue:
+		return fmt.Errorf("log: give %s its value in the same argument (%s<value>)", name, name)
+	}
+	return nil
+}
+
 func cmdLog(w *workspace.Workspace, args []string) error {
 	// git's -<n> shorthand
 	for i, a := range args {
@@ -41,9 +72,14 @@ func cmdLog(w *workspace.Workspace, args []string) error {
 			args[i] = "-n" + a[1:]
 		}
 	}
-	p, err := parseArgs("log", args, spec{bools: []string{"oneline"}, values: []string{"n|max-count"}})
+	p, err := parseArgs("log", args, spec{bools: []string{"oneline"}, values: []string{"n|max-count"}, passthrough: true})
 	if err != nil {
 		return err
+	}
+	for _, o := range p.opts {
+		if err := checkLogFilter(o); err != nil {
+			return err
+		}
 	}
 	count := 20
 	if v := p.last("max-count"); v != "" {
@@ -60,14 +96,8 @@ func cmdLog(w *workspace.Workspace, args []string) error {
 		commits []logCommit
 		err     error
 	}
-	results := workspace.Parallel(repos(targets), func(r *workspace.Repo) result {
-		var specs []string
-		for _, t := range targets {
-			if t.Repo == r {
-				specs = t.Pathspecs
-			}
-		}
-		c, err := readLog(r, count, specs)
+	results := eachTarget(targets, func(t workspace.Target) result {
+		c, err := readLog(t.Repo, count, p.opts, t.Pathspecs)
 		return result{c, err}
 	})
 	var lists [][]logCommit
@@ -90,11 +120,17 @@ func cmdLog(w *workspace.Workspace, args []string) error {
 	return nil
 }
 
-func readLog(r *workspace.Repo, count int, pathspecs []string) ([]logCommit, error) {
+// readLog reads up to count commits of the repo's log, all if count is 0. extra are git log options and revisions (HEAD if none), pathspecs
+// limit the log.
+func readLog(r *workspace.Repo, count int, extra, pathspecs []string) ([]logCommit, error) {
 	if !git.OK(r.Dir, "rev-parse", "-q", "--verify", "HEAD") {
 		return nil, nil // no commits yet
 	}
-	args := []string{"log", "-z", "-n", strconv.Itoa(count), "--format=%h%x1f%ct%x1f%ad%x1f%an%x1f%ae%x1f%B"}
+	args := []string{"log", "-z", "--format=%H%x1f%h%x1f%ct%x1f%ad%x1f%an%x1f%ae%x1f%B"}
+	if count > 0 {
+		args = append(args, "-n", strconv.Itoa(count))
+	}
+	args = append(args, extra...)
 	if len(pathspecs) > 0 {
 		args = append(append(args, "--"), pathspecs...)
 	}
@@ -104,16 +140,165 @@ func readLog(r *workspace.Repo, count int, pathspecs []string) ([]logCommit, err
 	}
 	var commits []logCommit
 	for _, rec := range strings.Split(string(out), "\x00") {
-		f := strings.SplitN(rec, "\x1f", 6)
-		if len(f) != 6 {
+		f := strings.SplitN(rec, "\x1f", 7)
+		if len(f) != 7 {
 			continue
 		}
-		ct, _ := strconv.ParseInt(f[1], 10, 64)
-		msg := strings.TrimRight(f[5], "\n")
+		ct, _ := strconv.ParseInt(f[2], 10, 64)
+		msg := strings.TrimRight(f[6], "\n")
 		subject, _, _ := strings.Cut(msg, "\n")
-		commits = append(commits, logCommit{r, f[0], time.Unix(ct, 0), f[2], f[3], f[4], msg, subject})
+		commits = append(commits, logCommit{r, f[0], f[1], time.Unix(ct, 0), f[3], f[4], f[5], msg, subject})
 	}
 	return commits, nil
+}
+
+// findCommit resolves rev, a commit given on the command line, in the repos; it must name a commit in exactly one of them.
+func findCommit(repos []*workspace.Repo, rev string) (logCommit, error) {
+	if strings.HasPrefix(rev, "-") {
+		return logCommit{}, fmt.Errorf("%s is no commit", rev)
+	}
+	type result struct {
+		commits []logCommit
+		err     error
+	}
+	results := workspace.Parallel(repos, func(r *workspace.Repo) result {
+		hash, err := git.Output(r.Dir, "rev-parse", "-q", "--verify", rev+"^{commit}")
+		if err != nil || hash == "" {
+			return result{}
+		}
+		c, err := readLog(r, 1, []string{hash}, nil)
+		return result{c, err}
+	})
+	var found []logCommit
+	for i, res := range results {
+		if res.err != nil {
+			return logCommit{}, fmt.Errorf("%s: %s", repos[i].Label(), res.err)
+		}
+		found = append(found, res.commits...)
+	}
+	switch len(found) {
+	case 0:
+		return logCommit{}, fmt.Errorf("%s is no commit in any of the repos", rev)
+	case 1:
+		return found[0], nil
+	}
+	names := make([]string, len(found))
+	for i, c := range found {
+		names[i] = c.repo.Label()
+	}
+	return logCommit{}, fmt.Errorf("%s names a commit in %s; give more of its hash, or select the repo with -r",
+		rev, strings.Join(names, ", "))
+}
+
+// newestCommit returns the latest commit on HEAD among the repos.
+func newestCommit(repos []*workspace.Repo) (logCommit, error) {
+	type result struct {
+		commits []logCommit
+		err     error
+	}
+	results := workspace.Parallel(repos, func(r *workspace.Repo) result {
+		c, err := readLog(r, 1, nil, nil)
+		return result{c, err}
+	})
+	var lists [][]logCommit
+	for i, res := range results {
+		if res.err != nil {
+			return logCommit{}, fmt.Errorf("%s: %s", repos[i].Label(), res.err)
+		}
+		lists = append(lists, res.commits)
+	}
+	if merged := mergeLogs(lists); len(merged) > 0 {
+		return merged[0], nil
+	}
+	return logCommit{}, errors.New("no commits in any of the repos")
+}
+
+// entryOf returns the pit commit c belongs to: the entry pit log shows it in, found among the repos' commits made around its time. The
+// repo of c is read from c on, so that a commit off its HEAD is found too.
+func entryOf(c logCommit, repos []*workspace.Repo) (logEntry, error) {
+	// an entry has at most one commit per repo, each within groupWindow of the next
+	span := time.Duration(len(repos)+1) * groupWindow
+	window := []string{"--since=@" + strconv.FormatInt(c.committed.Add(-span).Unix(), 10),
+		"--until=@" + strconv.FormatInt(c.committed.Add(span).Unix(), 10)}
+	type result struct {
+		commits []logCommit
+		err     error
+	}
+	results := workspace.Parallel(repos, func(r *workspace.Repo) result {
+		extra := window
+		if r == c.repo {
+			extra = append(slices.Clone(window), c.hash)
+		}
+		commits, err := readLog(r, 0, extra, nil)
+		return result{commits, err}
+	})
+	var lists [][]logCommit
+	for i, res := range results {
+		if res.err != nil {
+			return logEntry{}, fmt.Errorf("%s: %s", repos[i].Label(), res.err)
+		}
+		lists = append(lists, res.commits)
+	}
+	merged := mergeLogs(lists)
+	for _, e := range groupLog(merged, len(merged), repos) {
+		if slices.ContainsFunc(e.commits, func(d logCommit) bool { return d.repo == c.repo && d.hash == c.hash }) {
+			return e, nil
+		}
+	}
+	return logEntry{[]logCommit{c}}, nil
+}
+
+// cmdShow shows a pit commit, the newest one unless a commit of it is given: the entry pit log shows, then the changes of all its repos as
+// one diff, as pit diff prints them.
+func cmdShow(w *workspace.Workspace, args []string) error {
+	p, err := parseArgs("show", args, spec{passthrough: true})
+	if err != nil {
+		return err
+	}
+	if len(p.paths) > 1 {
+		return errors.New("show: give one commit; pit show finds the commits that belong with it in the other repos")
+	}
+	repos, err := p.selected(w)
+	if err != nil {
+		return err
+	}
+	var c logCommit
+	if len(p.paths) == 0 {
+		c, err = newestCommit(repos)
+	} else {
+		c, err = findCommit(repos, p.paths[0])
+	}
+	if err != nil {
+		return err
+	}
+	e, err := entryOf(c, repos)
+	if err != nil {
+		return err
+	}
+	printEntry(e, false)
+	blocks := listsFiles(p.opts)
+	var failed []string
+	for _, d := range e.commits {
+		if err := stopped(); err != nil {
+			return err
+		}
+		prefix := d.repo.RootRelative()
+		gitArgs := append([]string{"--no-pager", "show", "--format=", "--src-prefix=a/" + prefix, "--dst-prefix=b/" + prefix}, p.opts...)
+		if blocks {
+			header(d.repo)
+		}
+		err := git.Pass(d.repo.Dir, append(gitArgs, d.hash)...)
+		if blocks {
+			ui.End()
+		}
+		if err != nil {
+			failed = append(failed, d.repo.Label())
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("show failed in %s", strings.Join(failed, ", "))
+	}
+	return nil
 }
 
 // mergeLogs merges the repos' logs, newest commit first, keeping each repo's own order.
